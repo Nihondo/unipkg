@@ -165,57 +165,51 @@ if [[ "$USE_COLOR" == "false" ]]; then
     NC=""
 fi
 
-/**
- * コマンドの存在確認
- * 指定されたコマンドがPATH上に存在するかを確認する
- * @param {string} $1 - 確認するコマンド名
- * @return {number} 0: コマンドが存在, 1: コマンドが存在しない
- */
+# コマンドの存在確認
+# 指定されたコマンドがPATH上に存在するかを確認する
+# 引数:
+#   $1 - 確認するコマンド名
+# 戻り値:
+#   0: コマンドが存在, 1: コマンドが存在しない
 check_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
-/**
- * エラーメッセージを標準エラー出力に表示
- * 赤色でエラーメッセージを表示し、stderrに出力する
- * @param {string} $1 - エラーメッセージ
- */
+# エラーメッセージを標準エラー出力に表示
+# 赤色でエラーメッセージを表示し、stderrに出力する
+# 引数:
+#   $1 - エラーメッセージ
 print_error() {
     echo -e "${RED}エラー:${NC} $1" >&2
 }
 
-/**
- * 情報メッセージを標準エラー出力に表示
- * 青色で情報メッセージを表示し、stderrに出力する
- * @param {string} $1 - 情報メッセージ
- */
+# 情報メッセージを標準エラー出力に表示
+# 青色で情報メッセージを表示し、stderrに出力する
+# 引数:
+#   $1 - 情報メッセージ
 print_info() {
     echo -e "${BLUE}情報:${NC} $1" >&2
 }
 
-/**
- * 警告メッセージを標準エラー出力に表示
- * 黄色で警告メッセージを表示し、stderrに出力する
- * @param {string} $1 - 警告メッセージ
- */
+# 警告メッセージを標準エラー出力に表示
+# 黄色で警告メッセージを表示し、stderrに出力する
+# 引数:
+#   $1 - 警告メッセージ
 print_warning() {
     echo -e "${YELLOW}警告:${NC} $1" >&2
 }
 
-/**
- * 成功メッセージを標準エラー出力に表示
- * 緑色で成功メッセージを表示し、stderrに出力する
- * @param {string} $1 - 成功メッセージ
- */
+# 成功メッセージを標準エラー出力に表示
+# 緑色で成功メッセージを表示し、stderrに出力する
+# 引数:
+#   $1 - 成功メッセージ
 print_success() {
     echo -e "${GREEN}成功:${NC} $1" >&2
 }
 
-/**
- * Homebrewパッケージ一覧取得
- * `brew list --formula`を使用してインストール済みパッケージを取得
- * カウントモードではパッケージ数のみを返す
- */
+# Homebrewパッケージ一覧取得
+# `brew list --formula`を使用してインストール済みパッケージを取得
+# カウントモードではパッケージ数のみを返す
 get_brew_packages() {
     if check_command brew; then
         local packages
@@ -239,11 +233,9 @@ get_brew_packages() {
     fi
 }
 
-/**
- * npmパッケージ一覧取得
- * `npm list -g --depth=0 --parseable`でグローバルパッケージを取得
- * パスからパッケージ名を抽出し、nodeとnpmを除外する
- */
+# npmパッケージ一覧取得
+# `npm list -g --depth=0 --parseable`でグローバルパッケージを取得
+# パスからパッケージ名を抽出し、nodeとnpmを除外する
 get_npm_packages() {
     if check_command npm; then
         local packages
@@ -1657,11 +1649,10 @@ update_system_packages() {
     esac
 }
 
-/**
- * 結果をJSON形式で出力
- * タイムスタンプとパッケージ情報を含むJSONを生成
- * @param {string} $1 - CSV形式のパッケージデータ
- */
+# 結果をJSON形式で出力
+# タイムスタンプとパッケージ情報を含むJSONを生成
+# 引数:
+#   $1 - CSV形式のパッケージデータ
 output_json() {
     local data="$1"
     echo "{"
@@ -1683,23 +1674,21 @@ output_json() {
     echo "}"
 }
 
-/**
- * 結果をCSV形式で出力
- * ヘッダー付きのCSVとして出力
- * @param {string} $1 - CSV形式のパッケージデータ
- */
+# 結果をCSV形式で出力
+# ヘッダー付きのCSVとして出力
+# 引数:
+#   $1 - CSV形式のパッケージデータ
 output_csv() {
     local data="$1"
     echo "Manager,Package"
     echo "$data"
 }
 
-/**
- * 結果をテーブル形式で出力
- * 罫で区切られた見やすいテーブル形式で表示
- * 色付き出力に対応
- * @param {string} $1 - CSV形式のパッケージデータ
- */
+# 結果をテーブル形式で出力
+# 罫で区切られた見やすいテーブル形式で表示
+# 色付き出力に対応
+# 引数:
+#   $1 - CSV形式のパッケージデータ
 output_table() {
     local data="$1"
     
