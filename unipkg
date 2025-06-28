@@ -3,6 +3,10 @@
 # パッケージマネージャー一覧スクリプト
 # 各パッケージマネージャーからインストール済みパッケージを取得し、統一フォーマットで出力する
 
+# 厳密なエラーハンドリングを有効化
+# -e: エラー時に即座に終了
+# -u: 未定義変数使用時にエラー
+# -o pipefail: パイプライン内のエラーを検出
 set -euo pipefail
 
 # 色の定義
@@ -87,7 +91,10 @@ FORCE_MODE=false
 USE_COLOR=true
 REQUESTED_MANAGERS=()
 
-# オプション解析
+# コマンドライン引数の解析
+# getoptsの代わりにcase文で手動解析を行う理由:
+# - オプション引数が省略可能な場合への対応
+# - 長いオプション名への対応
 while [[ $# -gt 0 ]]; do
     case $1 in
         -h|--help)
@@ -118,6 +125,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         -u|--update)
             UPDATE_MODE=true
+            # オプション引数が存在し、他のオプションでない場合はパッケージ名として扱う
             if [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then
                 PACKAGE_NAME="$2"
                 shift 2
@@ -157,40 +165,68 @@ if [[ "$USE_COLOR" == "false" ]]; then
     NC=""
 fi
 
-# パッケージマネージャーが利用可能かチェック
+/**
+ * コマンドの存在確認
+ * 指定されたコマンドがPATH上に存在するかを確認する
+ * @param {string} $1 - 確認するコマンド名
+ * @return {number} 0: コマンドが存在, 1: コマンドが存在しない
+ */
 check_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# エラーメッセージ出力
+/**
+ * エラーメッセージを標準エラー出力に表示
+ * 赤色でエラーメッセージを表示し、stderrに出力する
+ * @param {string} $1 - エラーメッセージ
+ */
 print_error() {
     echo -e "${RED}エラー:${NC} $1" >&2
 }
 
-# 情報メッセージ出力
+/**
+ * 情報メッセージを標準エラー出力に表示
+ * 青色で情報メッセージを表示し、stderrに出力する
+ * @param {string} $1 - 情報メッセージ
+ */
 print_info() {
     echo -e "${BLUE}情報:${NC} $1" >&2
 }
 
-# 警告メッセージ出力
+/**
+ * 警告メッセージを標準エラー出力に表示
+ * 黄色で警告メッセージを表示し、stderrに出力する
+ * @param {string} $1 - 警告メッセージ
+ */
 print_warning() {
     echo -e "${YELLOW}警告:${NC} $1" >&2
 }
 
-# 成功メッセージ出力
+/**
+ * 成功メッセージを標準エラー出力に表示
+ * 緑色で成功メッセージを表示し、stderrに出力する
+ * @param {string} $1 - 成功メッセージ
+ */
 print_success() {
     echo -e "${GREEN}成功:${NC} $1" >&2
 }
 
-# Homebrewパッケージ一覧取得
+/**
+ * Homebrewパッケージ一覧取得
+ * `brew list --formula`を使用してインストール済みパッケージを取得
+ * カウントモードではパッケージ数のみを返す
+ */
 get_brew_packages() {
     if check_command brew; then
         local packages
+        # formulaオプションでcaskを除外し、アプリケーションパッケージのみ取得
         packages=$(brew list --formula 2>/dev/null | sort)
+        # wc -lの結果は先頭にスペースが入ることがあるためtrで除去
         local count=$(echo "$packages" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "brew,$count"
         else
+            # CSV形式で出力（manager,package）
             echo "$packages" | while read -r package; do
                 echo "brew,$package"
             done
@@ -203,7 +239,11 @@ get_brew_packages() {
     fi
 }
 
-# npmパッケージ一覧取得
+/**
+ * npmパッケージ一覧取得
+ * `npm list -g --depth=0 --parseable`でグローバルパッケージを取得
+ * パスからパッケージ名を抽出し、nodeとnpmを除外する
+ */
 get_npm_packages() {
     if check_command npm; then
         local packages
@@ -1617,7 +1657,11 @@ update_system_packages() {
     esac
 }
 
-# 結果を JSON 形式で出力
+/**
+ * 結果をJSON形式で出力
+ * タイムスタンプとパッケージ情報を含むJSONを生成
+ * @param {string} $1 - CSV形式のパッケージデータ
+ */
 output_json() {
     local data="$1"
     echo "{"
@@ -1639,14 +1683,23 @@ output_json() {
     echo "}"
 }
 
-# 結果を CSV 形式で出力
+/**
+ * 結果をCSV形式で出力
+ * ヘッダー付きのCSVとして出力
+ * @param {string} $1 - CSV形式のパッケージデータ
+ */
 output_csv() {
     local data="$1"
     echo "Manager,Package"
     echo "$data"
 }
 
-# 結果をテーブル形式で出力
+/**
+ * 結果をテーブル形式で出力
+ * 罫で区切られた見やすいテーブル形式で表示
+ * 色付き出力に対応
+ * @param {string} $1 - CSV形式のパッケージデータ
+ */
 output_table() {
     local data="$1"
     
