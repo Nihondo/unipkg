@@ -1,0 +1,1969 @@
+#!/bin/bash
+
+# パッケージマネージャー一覧スクリプト
+# 各パッケージマネージャーからインストール済みパッケージを取得し、統一フォーマットで出力する
+
+set -euo pipefail
+
+# 色の定義
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# ヘルプメッセージの表示
+show_help() {
+    cat << EOF
+使用法: $0 [オプション] [パッケージマネージャー...]
+
+パッケージマネージャーからインストール済みパッケージの一覧を取得します。
+
+オプション:
+    -h, --help          このヘルプメッセージを表示
+    -f, --format FORMAT 出力フォーマット (table|json|csv) [デフォルト: table]
+    -o, --output FILE   結果をファイルに出力
+    -c, --count         パッケージ数のみを表示
+    -i, --info PACKAGE  指定したパッケージの詳細情報を表示
+    -d, --delete PACKAGE     指定したパッケージを削除
+    -u, --update [PACKAGE]  全パッケージまたは指定パッケージをアップデート
+    --dry-run           実行内容を表示（実際には実行しない）
+    --force             確認なしで実行
+    --no-color          色の出力を無効にする
+
+対応パッケージマネージャー:
+    brew    Homebrew (macOS)
+    npm     Node Package Manager
+    cpan    CPAN (Perl)
+    perl    Perl modules (ExtUtils::Installed使用)
+    pip3    Python Package Index (pip3)
+    gem     Ruby Gems
+    cargo   Rust Cargo packages
+    go      Go modules (installed packages)
+    dnf     DNF Package Manager (Fedora/RHEL 8+)
+    yum     YUM Package Manager (RHEL/CentOS)
+    apt     APT Package Manager (Debian/Ubuntu)
+    dpkg    DPKG Package Manager (Debian/Ubuntu)
+    rpm     RPM Package Manager (Red Hat系)
+    nvm     Node Version Manager
+    rbenv   Ruby Version Manager
+    pyenv   Python Version Manager
+    nodenv  Node Version Manager (alternative)
+    tfenv   Terraform Version Manager
+    jenv    Java Version Manager
+    asdf    Universal Version Manager
+    gvm     Go Version Manager
+    rustup  Rust toolchain installer
+
+例:
+    $0                  # 全パッケージマネージャーの一覧を表示
+    $0 brew npm pip3    # brew、npm、pip3のみ表示
+    $0 -f json          # JSON形式で出力
+    $0 -c               # パッケージ数のみ表示
+    $0 gem cargo        # RubyとRustのパッケージのみ表示
+    $0 dnf apt          # システムパッケージマネージャーのみ表示
+    $0 nvm pyenv rbenv  # バージョン管理マネージャーのみ表示
+    $0 -i git           # gitパッケージの詳細情報を表示
+    $0 -i express npm   # npmでexpressの詳細情報を表示
+    $0 -d oldpackage    # 各パッケージマネージャーからoldpackageを削除
+    $0 -d somelib npm --dry-run  # npmでsomelibの削除内容を確認
+    $0 -d package --force        # 確認なしでパッケージを削除
+    $0 -u                # 全パッケージマネージャーでアップデート実行
+    $0 -u somepackage            # 指定パッケージのみアップデート
+    $0 -u --dry-run              # アップデート内容を確認
+EOF
+}
+
+# デフォルト値
+OUTPUT_FORMAT="table"
+OUTPUT_FILE=""
+COUNT_ONLY=false
+INFO_MODE=false
+DELETE_MODE=false
+UPDATE_MODE=false
+PACKAGE_NAME=""
+DRY_RUN=false
+FORCE_MODE=false
+USE_COLOR=true
+REQUESTED_MANAGERS=()
+
+# オプション解析
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -f|--format)
+            OUTPUT_FORMAT="$2"
+            shift 2
+            ;;
+        -o|--output)
+            OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        -c|--count)
+            COUNT_ONLY=true
+            shift
+            ;;
+        -i|--info)
+            INFO_MODE=true
+            PACKAGE_NAME="$2"
+            shift 2
+            ;;
+        -d|--delete)
+            DELETE_MODE=true
+            PACKAGE_NAME="$2"
+            shift 2
+            ;;
+        -u|--update)
+            UPDATE_MODE=true
+            if [[ -n "${2:-}" ]] && [[ ! "$2" =~ ^-- ]]; then
+                PACKAGE_NAME="$2"
+                shift 2
+            else
+                shift
+            fi
+            ;;
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --force)
+            FORCE_MODE=true
+            shift
+            ;;
+        --no-color)
+            USE_COLOR=false
+            shift
+            ;;
+        -*)
+            echo "不明なオプション: $1" >&2
+            exit 1
+            ;;
+        *)
+            REQUESTED_MANAGERS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# 色出力制御
+if [[ "$USE_COLOR" == "false" ]]; then
+    RED=""
+    GREEN=""
+    YELLOW=""
+    BLUE=""
+    NC=""
+fi
+
+# パッケージマネージャーが利用可能かチェック
+check_command() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# エラーメッセージ出力
+print_error() {
+    echo -e "${RED}エラー:${NC} $1" >&2
+}
+
+# 情報メッセージ出力
+print_info() {
+    echo -e "${BLUE}情報:${NC} $1" >&2
+}
+
+# 警告メッセージ出力
+print_warning() {
+    echo -e "${YELLOW}警告:${NC} $1" >&2
+}
+
+# 成功メッセージ出力
+print_success() {
+    echo -e "${GREEN}成功:${NC} $1" >&2
+}
+
+# Homebrewパッケージ一覧取得
+get_brew_packages() {
+    if check_command brew; then
+        local packages
+        packages=$(brew list --formula 2>/dev/null | sort)
+        local count=$(echo "$packages" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "brew,$count"
+        else
+            echo "$packages" | while read -r package; do
+                echo "brew,$package"
+            done
+        fi
+    else
+        print_warning "Homebrewが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "brew,0"
+        fi
+    fi
+}
+
+# npmパッケージ一覧取得
+get_npm_packages() {
+    if check_command npm; then
+        local packages
+        packages=$(npm list -g --depth=0 --parseable 2>/dev/null | \
+                  grep -v "^/opt/homebrew/lib$" | \
+                  sed 's|.*/||' | \
+                  grep -v "^$" | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "npm,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "npm,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "npmが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "npm,0"
+        fi
+    fi
+}
+
+# Perlモジュール一覧取得
+get_perl_packages() {
+    if command -v perl >/dev/null 2>&1; then
+        local packages
+        packages=$(perl -MExtUtils::Installed -e 'my $inst = ExtUtils::Installed->new(); print join("\n", $inst->modules());' 2>/dev/null | \
+                  grep -v "^Perl$" | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "perl,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "perl,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "Perlが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "perl,0"
+        fi
+    fi
+}
+
+# CPAN一覧取得（注意：設定が必要な場合があります）
+get_cpan_packages() {
+    print_warning "CPAN一覧取得は設定が複雑なため、Perlモジュール一覧を代替として使用します"
+    get_perl_packages
+}
+
+# pip3パッケージ一覧取得
+get_pip3_packages() {
+    if check_command pip3; then
+        local packages
+        packages=$(pip3 list --format=freeze 2>/dev/null | \
+                  cut -d'=' -f1 | \
+                  grep -v "^$" | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "pip3,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "pip3,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "pip3が見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "pip3,0"
+        fi
+    fi
+}
+
+# Rubygemsパッケージ一覧取得
+get_gem_packages() {
+    if check_command gem; then
+        local packages
+        packages=$(gem list --no-versions 2>/dev/null | \
+                  grep -v "^$" | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "gem,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "gem,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "gemが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "gem,0"
+        fi
+    fi
+}
+
+# Cargoパッケージ一覧取得
+get_cargo_packages() {
+    if check_command cargo; then
+        local packages
+        packages=$(cargo install --list 2>/dev/null | \
+                  grep -v ":" | \
+                  awk '{print $1}' | \
+                  grep -v "^$" | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "cargo,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "cargo,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "cargoが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "cargo,0"
+        fi
+    fi
+}
+
+# Goモジュール一覧取得
+get_go_packages() {
+    if check_command go; then
+        local packages=""
+        local count=0
+        
+        # GOPATHが設定されている場合、そこからパッケージを探す
+        if [[ -n "${GOPATH:-}" ]] && [[ -d "$GOPATH/pkg/mod" ]]; then
+            packages=$(find "$GOPATH/pkg/mod" -maxdepth 2 -type d 2>/dev/null | \
+                      grep -v "cache" | \
+                      sed "s|$GOPATH/pkg/mod/||" | \
+                      grep "/" | \
+                      sort | \
+                      uniq)
+            count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        elif [[ -d "$HOME/go/pkg/mod" ]]; then
+            packages=$(find "$HOME/go/pkg/mod" -maxdepth 2 -type d 2>/dev/null | \
+                      grep -v "cache" | \
+                      sed "s|$HOME/go/pkg/mod/||" | \
+                      grep "/" | \
+                      sort | \
+                      uniq)
+            count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        fi
+        
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "go,$count"
+        else
+            if [[ -n "$packages" ]]; then
+                echo "$packages" | while read -r package; do
+                    if [[ -n "$package" ]]; then
+                        echo "go,$package"
+                    fi
+                done
+            fi
+        fi
+    else
+        print_warning "goが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "go,0"
+        fi
+    fi
+}
+
+# DNFパッケージ一覧取得
+get_dnf_packages() {
+    if check_command dnf; then
+        local packages
+        packages=$(dnf list installed 2>/dev/null | \
+                  tail -n +2 | \
+                  awk '{print $1}' | \
+                  sed 's/\.[^.]*$//' | \
+                  sort | \
+                  uniq)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "dnf,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "dnf,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "dnfが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "dnf,0"
+        fi
+    fi
+}
+
+# YUMパッケージ一覧取得
+get_yum_packages() {
+    if check_command yum; then
+        local packages
+        packages=$(yum list installed 2>/dev/null | \
+                  tail -n +2 | \
+                  awk '{print $1}' | \
+                  sed 's/\.[^.]*$//' | \
+                  sort | \
+                  uniq)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "yum,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "yum,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "yumが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "yum,0"
+        fi
+    fi
+}
+
+# APTパッケージ一覧取得
+get_apt_packages() {
+    if check_command apt; then
+        local packages
+        packages=$(apt list --installed 2>/dev/null | \
+                  grep -v "WARNING" | \
+                  tail -n +2 | \
+                  awk -F'/' '{print $1}' | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "apt,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "apt,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "aptが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "apt,0"
+        fi
+    fi
+}
+
+# DPKGパッケージ一覧取得
+get_dpkg_packages() {
+    if check_command dpkg; then
+        local packages
+        packages=$(dpkg -l 2>/dev/null | \
+                  grep "^ii" | \
+                  awk '{print $2}' | \
+                  sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "dpkg,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "dpkg,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "dpkgが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "dpkg,0"
+        fi
+    fi
+}
+
+# RPMパッケージ一覧取得
+get_rpm_packages() {
+    if check_command rpm; then
+        local packages
+        packages=$(rpm -qa --queryformat '%{NAME}\n' 2>/dev/null | \
+                  sort | \
+                  uniq)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "rpm,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "rpm,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "rpmが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "rpm,0"
+        fi
+    fi
+}
+
+# nvmバージョン一覧取得
+get_nvm_packages() {
+    if [[ -d "$HOME/.nvm/versions/node" ]]; then
+        local packages
+        packages=$(ls "$HOME/.nvm/versions/node" 2>/dev/null | sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "nvm,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "nvm,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "nvmが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "nvm,0"
+        fi
+    fi
+}
+
+# rbenvバージョン一覧取得
+get_rbenv_packages() {
+    if check_command rbenv || [[ -d "$HOME/.rbenv/versions" ]]; then
+        local packages
+        if check_command rbenv; then
+            packages=$(rbenv versions --bare 2>/dev/null | sort)
+        else
+            packages=$(ls "$HOME/.rbenv/versions" 2>/dev/null | sort)
+        fi
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "rbenv,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "rbenv,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "rbenvが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "rbenv,0"
+        fi
+    fi
+}
+
+# pyenvバージョン一覧取得
+get_pyenv_packages() {
+    if check_command pyenv || [[ -d "$HOME/.pyenv/versions" ]]; then
+        local packages
+        if check_command pyenv; then
+            packages=$(pyenv versions --bare 2>/dev/null | grep -v "system" | sort)
+        else
+            packages=$(ls "$HOME/.pyenv/versions" 2>/dev/null | sort)
+        fi
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "pyenv,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "pyenv,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "pyenvが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "pyenv,0"
+        fi
+    fi
+}
+
+# nodenvバージョン一覧取得
+get_nodenv_packages() {
+    if check_command nodenv || [[ -d "$HOME/.nodenv/versions" ]]; then
+        local packages
+        if check_command nodenv; then
+            packages=$(nodenv versions --bare 2>/dev/null | sort)
+        else
+            packages=$(ls "$HOME/.nodenv/versions" 2>/dev/null | sort)
+        fi
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "nodenv,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "nodenv,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "nodenvが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "nodenv,0"
+        fi
+    fi
+}
+
+# tfenvバージョン一覧取得
+get_tfenv_packages() {
+    if check_command tfenv || [[ -d "$HOME/.tfenv/versions" ]]; then
+        local packages
+        if check_command tfenv; then
+            packages=$(tfenv list 2>/dev/null | grep -v "^*" | sed 's/^\s*//' | sort)
+        else
+            packages=$(ls "$HOME/.tfenv/versions" 2>/dev/null | sort)
+        fi
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "tfenv,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "tfenv,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "tfenvが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "tfenv,0"
+        fi
+    fi
+}
+
+# jenvバージョン一覧取得
+get_jenv_packages() {
+    if check_command jenv || [[ -d "$HOME/.jenv/versions" ]]; then
+        local packages
+        if check_command jenv; then
+            packages=$(jenv versions --bare 2>/dev/null | grep -v "system" | sort)
+        else
+            packages=$(ls "$HOME/.jenv/versions" 2>/dev/null | sort)
+        fi
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "jenv,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "jenv,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "jenvが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "jenv,0"
+        fi
+    fi
+}
+
+# asdfバージョン一覧取得
+get_asdf_packages() {
+    if check_command asdf || [[ -d "$HOME/.asdf" ]]; then
+        local packages=""
+        if check_command asdf; then
+            # asdfでインストールされた全てのツールとバージョンを取得
+            local tools=$(asdf plugin list 2>/dev/null)
+            if [[ -n "$tools" ]]; then
+                while read -r tool; do
+                    if [[ -n "$tool" ]]; then
+                        local versions=$(asdf list "$tool" 2>/dev/null | sed 's/^\s*//' | grep -v "^$")
+                        while read -r version; do
+                            if [[ -n "$version" ]]; then
+                                packages="${packages}${tool}-${version}\n"
+                            fi
+                        done <<< "$versions"
+                    fi
+                done <<< "$tools"
+            fi
+        fi
+        
+        packages=$(echo -e "$packages" | grep -v "^$" | sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "asdf,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "asdf,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "asdfが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "asdf,0"
+        fi
+    fi
+}
+
+# gvmバージョン一覧取得
+get_gvm_packages() {
+    if [[ -d "$HOME/.gvm/gos" ]]; then
+        local packages
+        packages=$(ls "$HOME/.gvm/gos" 2>/dev/null | sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "gvm,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "gvm,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "gvmが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "gvm,0"
+        fi
+    fi
+}
+
+# rustupツールチェーン一覧取得
+get_rustup_packages() {
+    if check_command rustup; then
+        local packages
+        packages=$(rustup toolchain list 2>/dev/null | awk '{print $1}' | sort)
+        local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "rustup,$count"
+        else
+            echo "$packages" | while read -r package; do
+                if [[ -n "$package" ]]; then
+                    echo "rustup,$package"
+                fi
+            done
+        fi
+    else
+        print_warning "rustupが見つかりません"
+        if [[ "$COUNT_ONLY" == "true" ]]; then
+            echo "rustup,0"
+        fi
+    fi
+}
+
+# パッケージ情報取得関数群
+
+# Homebrewパッケージ情報取得
+get_brew_info() {
+    local package="$1"
+    if check_command brew; then
+        brew info "$package" 2>/dev/null
+    else
+        echo "brew: コマンドが見つかりません"
+    fi
+}
+
+# npmパッケージ情報取得
+get_npm_info() {
+    local package="$1"
+    if check_command npm; then
+        npm info "$package" 2>/dev/null
+    else
+        echo "npm: コマンドが見つかりません"
+    fi
+}
+
+# pip3パッケージ情報取得
+get_pip3_info() {
+    local package="$1"
+    if check_command pip3; then
+        pip3 show "$package" 2>/dev/null
+    else
+        echo "pip3: コマンドが見つかりません"
+    fi
+}
+
+# gemパッケージ情報取得
+get_gem_info() {
+    local package="$1"
+    if check_command gem; then
+        gem info "$package" 2>/dev/null
+    else
+        echo "gem: コマンドが見つかりません"
+    fi
+}
+
+# cargoパッケージ情報取得
+get_cargo_info() {
+    local package="$1"
+    if check_command cargo; then
+        # cargoには直接的な情報表示コマンドがないため、インストール済みリストから検索
+        local installed=$(cargo install --list 2>/dev/null | grep "^$package ")
+        if [[ -n "$installed" ]]; then
+            echo "パッケージ: $package"
+            echo "$installed"
+            echo ""
+            echo "詳細情報を取得するには 'cargo search $package' を実行してください"
+        else
+            echo "$package: インストールされていません"
+        fi
+    else
+        echo "cargo: コマンドが見つかりません"
+    fi
+}
+
+# dnfパッケージ情報取得
+get_dnf_info() {
+    local package="$1"
+    if check_command dnf; then
+        dnf info "$package" 2>/dev/null
+    else
+        echo "dnf: コマンドが見つかりません"
+    fi
+}
+
+# yumパッケージ情報取得
+get_yum_info() {
+    local package="$1"
+    if check_command yum; then
+        yum info "$package" 2>/dev/null
+    else
+        echo "yum: コマンドが見つかりません"
+    fi
+}
+
+# aptパッケージ情報取得
+get_apt_info() {
+    local package="$1"
+    if check_command apt; then
+        apt show "$package" 2>/dev/null
+    else
+        echo "apt: コマンドが見つかりません"
+    fi
+}
+
+# dpkgパッケージ情報取得
+get_dpkg_info() {
+    local package="$1"
+    if check_command dpkg; then
+        dpkg -l "$package" 2>/dev/null
+        echo ""
+        dpkg -s "$package" 2>/dev/null
+    else
+        echo "dpkg: コマンドが見つかりません"
+    fi
+}
+
+# rpmパッケージ情報取得
+get_rpm_info() {
+    local package="$1"
+    if check_command rpm; then
+        rpm -qi "$package" 2>/dev/null
+    else
+        echo "rpm: コマンドが見つかりません"
+    fi
+}
+
+# perlモジュール情報取得
+get_perl_info() {
+    local package="$1"
+    if command -v perl >/dev/null 2>&1; then
+        perl -M"$package" -e "print \"モジュール: $package\n\"" 2>/dev/null && \
+        perl -M"$package" -e "print \"バージョン: \$$package::VERSION\n\"" 2>/dev/null || \
+        echo "$package: モジュールが見つからないか、情報を取得できません"
+    else
+        echo "perl: コマンドが見つかりません"
+    fi
+}
+
+# Goモジュール情報取得
+get_go_info() {
+    local package="$1"
+    if check_command go; then
+        echo "Goモジュール: $package"
+        if [[ -n "${GOPATH:-}" ]] && [[ -d "$GOPATH/pkg/mod" ]]; then
+            find "$GOPATH/pkg/mod" -name "*$package*" -type d 2>/dev/null | head -10
+        elif [[ -d "$HOME/go/pkg/mod" ]]; then
+            find "$HOME/go/pkg/mod" -name "*$package*" -type d 2>/dev/null | head -10
+        fi
+        echo ""
+        echo "詳細情報を取得するには 'go list -m $package' を実行してください"
+    else
+        echo "go: コマンドが見つかりません"
+    fi
+}
+
+# バージョン管理マネージャー情報取得
+get_version_manager_info() {
+    local manager="$1"
+    local package="$2"
+    
+    case "$manager" in
+        nvm)
+            if [[ -d "$HOME/.nvm/versions/node/$package" ]]; then
+                echo "nvm: Node.js $package がインストールされています"
+                echo "パス: $HOME/.nvm/versions/node/$package"
+            else
+                echo "nvm: Node.js $package が見つかりません"
+            fi
+            ;;
+        rbenv)
+            if check_command rbenv; then
+                if rbenv versions --bare 2>/dev/null | grep -q "^$package$"; then
+                    echo "rbenv: Ruby $package がインストールされています"
+                    rbenv version 2>/dev/null
+                else
+                    echo "rbenv: Ruby $package が見つかりません"
+                fi
+            else
+                echo "rbenv: コマンドが見つかりません"
+            fi
+            ;;
+        pyenv)
+            if check_command pyenv; then
+                if pyenv versions --bare 2>/dev/null | grep -q "^$package$"; then
+                    echo "pyenv: Python $package がインストールされています"
+                    pyenv version 2>/dev/null
+                else
+                    echo "pyenv: Python $package が見つかりません"
+                fi
+            else
+                echo "pyenv: コマンドが見つかりません"
+            fi
+            ;;
+        asdf)
+            if check_command asdf; then
+                local tool_version=$(echo "$package" | sed 's/-/ /')
+                echo "asdf: $tool_version の情報"
+                asdf current 2>/dev/null | grep "$(echo $package | cut -d'-' -f1)" || echo "情報が見つかりません"
+            else
+                echo "asdf: コマンドが見つかりません"
+            fi
+            ;;
+        rustup)
+            if check_command rustup; then
+                if rustup toolchain list 2>/dev/null | grep -q "^$package"; then
+                    echo "rustup: ツールチェイン $package がインストールされています"
+                    rustup show 2>/dev/null
+                else
+                    echo "rustup: ツールチェイン $package が見つかりません"
+                fi
+            else
+                echo "rustup: コマンドが見つかりません"
+            fi
+            ;;
+        *)
+            echo "$manager: 情報取得に対応していません"
+            ;;
+    esac
+}
+
+# パッケージアンインストール関数群
+
+# 確認メッセージ表示
+confirm_uninstall() {
+    local manager="$1"
+    local package="$2"
+    
+    if [[ "$FORCE_MODE" == "true" ]]; then
+        return 0
+    fi
+    
+    echo -e "${YELLOW}警告: $manager から $package をアンインストールしようとしています。${NC}"
+    echo -e "${YELLOW}この操作は取り消せません。続行しますか？ (y/N)${NC}"
+    read -r response
+    case "$response" in
+        [yY]|[yY][eE][sS])
+            return 0
+            ;;
+        *)
+            echo "アンインストールをキャンセルしました。"
+            return 1
+            ;;
+    esac
+}
+
+# Homebrewアンインストール
+uninstall_brew_package() {
+    local package="$1"
+    if check_command brew; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: brew uninstall $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "brew" "$package"; then
+            print_info "brew で $package をアンインストールしています..."
+            if brew uninstall "$package" 2>/dev/null; then
+                print_success "brew: $package のアンインストールが完了しました"
+            else
+                print_error "brew: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "brewが見つかりません"
+    fi
+}
+
+# npmアンインストール
+uninstall_npm_package() {
+    local package="$1"
+    if check_command npm; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: npm uninstall -g $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "npm" "$package"; then
+            print_info "npm で $package をアンインストールしています..."
+            if npm uninstall -g "$package" 2>/dev/null; then
+                print_success "npm: $package のアンインストールが完了しました"
+            else
+                print_error "npm: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "npmが見つかりません"
+    fi
+}
+
+# pip3アンインストール
+uninstall_pip3_package() {
+    local package="$1"
+    if check_command pip3; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: pip3 uninstall $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "pip3" "$package"; then
+            print_info "pip3 で $package をアンインストールしています..."
+            if echo "y" | pip3 uninstall "$package" 2>/dev/null; then
+                print_success "pip3: $package のアンインストールが完了しました"
+            else
+                print_error "pip3: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "pip3が見つかりません"
+    fi
+}
+
+# gemアンインストール
+uninstall_gem_package() {
+    local package="$1"
+    if check_command gem; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: gem uninstall $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "gem" "$package"; then
+            print_info "gem で $package をアンインストールしています..."
+            if gem uninstall "$package" 2>/dev/null; then
+                print_success "gem: $package のアンインストールが完了しました"
+            else
+                print_error "gem: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "gemが見つかりません"
+    fi
+}
+
+# cargoアンインストール
+uninstall_cargo_package() {
+    local package="$1"
+    if check_command cargo; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: cargo uninstall $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "cargo" "$package"; then
+            print_info "cargo で $package をアンインストールしています..."
+            if cargo uninstall "$package" 2>/dev/null; then
+                print_success "cargo: $package のアンインストールが完了しました"
+            else
+                print_error "cargo: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "cargoが見つかりません"
+    fi
+}
+
+# dnfアンインストール
+uninstall_dnf_package() {
+    local package="$1"
+    if check_command dnf; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: sudo dnf remove $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "dnf" "$package"; then
+            print_info "dnf で $package をアンインストールしています..."
+            if sudo dnf remove "$package" 2>/dev/null; then
+                print_success "dnf: $package のアンインストールが完了しました"
+            else
+                print_error "dnf: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "dnfが見つかりません"
+    fi
+}
+
+# yumアンインストール
+uninstall_yum_package() {
+    local package="$1"
+    if check_command yum; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: sudo yum remove $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "yum" "$package"; then
+            print_info "yum で $package をアンインストールしています..."
+            if sudo yum remove "$package" 2>/dev/null; then
+                print_success "yum: $package のアンインストールが完了しました"
+            else
+                print_error "yum: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "yumが見つかりません"
+    fi
+}
+
+# aptアンインストール
+uninstall_apt_package() {
+    local package="$1"
+    if check_command apt; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: sudo apt remove $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "apt" "$package"; then
+            print_info "apt で $package をアンインストールしています..."
+            if sudo apt remove "$package" 2>/dev/null; then
+                print_success "apt: $package のアンインストールが完了しました"
+            else
+                print_error "apt: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "aptが見つかりません"
+    fi
+}
+
+# dpkgアンインストール
+uninstall_dpkg_package() {
+    local package="$1"
+    if check_command dpkg; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: sudo dpkg -r $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "dpkg" "$package"; then
+            print_info "dpkg で $package をアンインストールしています..."
+            if sudo dpkg -r "$package" 2>/dev/null; then
+                print_success "dpkg: $package のアンインストールが完了しました"
+            else
+                print_error "dpkg: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "dpkgが見つかりません"
+    fi
+}
+
+# rpmアンインストール
+uninstall_rpm_package() {
+    local package="$1"
+    if check_command rpm; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "実行コマンド: sudo rpm -e $package"
+            return 0
+        fi
+        
+        if confirm_uninstall "rpm" "$package"; then
+            print_info "rpm で $package をアンインストールしています..."
+            if sudo rpm -e "$package" 2>/dev/null; then
+                print_success "rpm: $package のアンインストールが完了しました"
+            else
+                print_error "rpm: $package のアンインストールに失敗しました"
+            fi
+        fi
+    else
+        print_warning "rpmが見つかりません"
+    fi
+}
+
+# バージョン管理マネージャーアンインストール
+uninstall_version_manager() {
+    local manager="$1"
+    local package="$2"
+    
+    case "$manager" in
+        nvm)
+            if [[ -d "$HOME/.nvm/versions/node/$package" ]]; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    echo "実行操作: rm -rf $HOME/.nvm/versions/node/$package"
+                    return 0
+                fi
+                
+                if confirm_uninstall "nvm" "$package"; then
+                    print_info "nvm で Node.js $package をアンインストールしています..."
+                    if rm -rf "$HOME/.nvm/versions/node/$package" 2>/dev/null; then
+                        print_success "nvm: Node.js $package のアンインストールが完了しました"
+                    else
+                        print_error "nvm: Node.js $package のアンインストールに失敗しました"
+                    fi
+                fi
+            else
+                print_warning "nvm: Node.js $package が見つかりません"
+            fi
+            ;;
+        rbenv)
+            if check_command rbenv; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    echo "実行コマンド: rbenv uninstall $package"
+                    return 0
+                fi
+                
+                if confirm_uninstall "rbenv" "$package"; then
+                    print_info "rbenv で Ruby $package をアンインストールしています..."
+                    if rbenv uninstall -f "$package" 2>/dev/null; then
+                        print_success "rbenv: Ruby $package のアンインストールが完了しました"
+                    else
+                        print_error "rbenv: Ruby $package のアンインストールに失敗しました"
+                    fi
+                fi
+            else
+                print_warning "rbenvが見つかりません"
+            fi
+            ;;
+        pyenv)
+            if check_command pyenv; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    echo "実行コマンド: pyenv uninstall $package"
+                    return 0
+                fi
+                
+                if confirm_uninstall "pyenv" "$package"; then
+                    print_info "pyenv で Python $package をアンインストールしています..."
+                    if pyenv uninstall -f "$package" 2>/dev/null; then
+                        print_success "pyenv: Python $package のアンインストールが完了しました"
+                    else
+                        print_error "pyenv: Python $package のアンインストールに失敗しました"
+                    fi
+                fi
+            else
+                print_warning "pyenvが見つかりません"
+            fi
+            ;;
+        rustup)
+            if check_command rustup; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    echo "実行コマンド: rustup toolchain uninstall $package"
+                    return 0
+                fi
+                
+                if confirm_uninstall "rustup" "$package"; then
+                    print_info "rustup でツールチェイン $package をアンインストールしています..."
+                    if rustup toolchain uninstall "$package" 2>/dev/null; then
+                        print_success "rustup: ツールチェイン $package のアンインストールが完了しました"
+                    else
+                        print_error "rustup: ツールチェイン $package のアンインストールに失敗しました"
+                    fi
+                fi
+            else
+                print_warning "rustupが見つかりません"
+            fi
+            ;;
+        *)
+            print_warning "$manager: アンインストールに対応していません"
+            ;;
+    esac
+}
+
+# パッケージアップデート関数群
+
+# 確認メッセージ表示（アップデート用）
+confirm_update() {
+    local manager="$1"
+    local package="$2"
+    
+    if [[ "$FORCE_MODE" == "true" ]]; then
+        return 0
+    fi
+    
+    if [[ -n "$package" ]]; then
+        echo -e "${YELLOW}$manager で $package をアップデートしようとしています。続行しますか？ (y/N)${NC}"
+    else
+        echo -e "${YELLOW}$manager で全パッケージをアップデートしようとしています。続行しますか？ (y/N)${NC}"
+    fi
+    read -r response
+    case "$response" in
+        [yY]|[yY][eE][sS])
+            return 0
+            ;;
+        *)
+            echo "アップデートをキャンセルしました。"
+            return 1
+            ;;
+    esac
+}
+
+# Homebrewアップデート
+update_brew_packages() {
+    local package="$1"
+    if check_command brew; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ -n "$package" ]]; then
+                echo "実行コマンド: brew upgrade $package"
+            else
+                echo "実行コマンド: brew update && brew upgrade"
+            fi
+            return 0
+        fi
+        
+        if confirm_update "brew" "$package"; then
+            if [[ -n "$package" ]]; then
+                print_info "brew で $package をアップデートしています..."
+                if brew upgrade "$package" 2>/dev/null; then
+                    print_success "brew: $package のアップデートが完了しました"
+                else
+                    print_error "brew: $package のアップデートに失敗しました"
+                fi
+            else
+                print_info "brew で全パッケージをアップデートしています..."
+                if brew update && brew upgrade 2>/dev/null; then
+                    print_success "brew: 全パッケージのアップデートが完了しました"
+                else
+                    print_error "brew: アップデートに失敗しました"
+                fi
+            fi
+        fi
+    else
+        print_warning "brewが見つかりません"
+    fi
+}
+
+# npmアップデート
+update_npm_packages() {
+    local package="$1"
+    if check_command npm; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ -n "$package" ]]; then
+                echo "実行コマンド: npm update -g $package"
+            else
+                echo "実行コマンド: npm update -g"
+            fi
+            return 0
+        fi
+        
+        if confirm_update "npm" "$package"; then
+            if [[ -n "$package" ]]; then
+                print_info "npm で $package をアップデートしています..."
+                if npm update -g "$package" 2>/dev/null; then
+                    print_success "npm: $package のアップデートが完了しました"
+                else
+                    print_error "npm: $package のアップデートに失敗しました"
+                fi
+            else
+                print_info "npm で全グローバルパッケージをアップデートしています..."
+                if npm update -g 2>/dev/null; then
+                    print_success "npm: 全パッケージのアップデートが完了しました"
+                else
+                    print_error "npm: アップデートに失敗しました"
+                fi
+            fi
+        fi
+    else
+        print_warning "npmが見つかりません"
+    fi
+}
+
+# pip3アップデート
+update_pip3_packages() {
+    local package="$1"
+    if check_command pip3; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ -n "$package" ]]; then
+                echo "実行コマンド: pip3 install --upgrade $package"
+            else
+                echo "実行コマンド: pip3 list --outdated --format=freeze | cut -d = -f 1 | xargs -n1 pip3 install -U"
+            fi
+            return 0
+        fi
+        
+        if confirm_update "pip3" "$package"; then
+            if [[ -n "$package" ]]; then
+                print_info "pip3 で $package をアップデートしています..."
+                if pip3 install --upgrade "$package" 2>/dev/null; then
+                    print_success "pip3: $package のアップデートが完了しました"
+                else
+                    print_error "pip3: $package のアップデートに失敗しました"
+                fi
+            else
+                print_info "pip3 で全パッケージをアップデートしています..."
+                local outdated=$(pip3 list --outdated --format=freeze 2>/dev/null | cut -d = -f 1)
+                if [[ -n "$outdated" ]]; then
+                    echo "$outdated" | while read -r pkg; do
+                        if [[ -n "$pkg" ]]; then
+                            pip3 install --upgrade "$pkg" 2>/dev/null && \
+                            print_success "pip3: $pkg をアップデートしました" || \
+                            print_error "pip3: $pkg のアップデートに失敗しました"
+                        fi
+                    done
+                else
+                    print_info "pip3: アップデート可能なパッケージはありません"
+                fi
+            fi
+        fi
+    else
+        print_warning "pip3が見つかりません"
+    fi
+}
+
+# gemアップデート
+update_gem_packages() {
+    local package="$1"
+    if check_command gem; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ -n "$package" ]]; then
+                echo "実行コマンド: gem update $package"
+            else
+                echo "実行コマンド: gem update"
+            fi
+            return 0
+        fi
+        
+        if confirm_update "gem" "$package"; then
+            if [[ -n "$package" ]]; then
+                print_info "gem で $package をアップデートしています..."
+                if gem update "$package" 2>/dev/null; then
+                    print_success "gem: $package のアップデートが完了しました"
+                else
+                    print_error "gem: $package のアップデートに失敗しました"
+                fi
+            else
+                print_info "gem で全パッケージをアップデートしています..."
+                if gem update 2>/dev/null; then
+                    print_success "gem: 全パッケージのアップデートが完了しました"
+                else
+                    print_error "gem: アップデートに失敗しました"
+                fi
+            fi
+        fi
+    else
+        print_warning "gemが見つかりません"
+    fi
+}
+
+# cargoアップデート
+update_cargo_packages() {
+    local package="$1"
+    if check_command cargo; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ -n "$package" ]]; then
+                echo "実行コマンド: cargo install $package"
+            else
+                echo "注意: cargo は個別パッケージの再インストールが必要です"
+            fi
+            return 0
+        fi
+        
+        if [[ -n "$package" ]]; then
+            if confirm_update "cargo" "$package"; then
+                print_info "cargo で $package を再インストールしています..."
+                if cargo install "$package" 2>/dev/null; then
+                    print_success "cargo: $package の再インストールが完了しました"
+                else
+                    print_error "cargo: $package の再インストールに失敗しました"
+                fi
+            fi
+        else
+            print_warning "cargo: 全パッケージのアップデートには個別の再インストールが必要です"
+        fi
+    else
+        print_warning "cargoが見つかりません"
+    fi
+}
+
+# システムパッケージマネージャーアップデート
+update_system_packages() {
+    local manager="$1"
+    local package="$2"
+    
+    case "$manager" in
+        dnf)
+            if check_command dnf; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    if [[ -n "$package" ]]; then
+                        echo "実行コマンド: sudo dnf update $package"
+                    else
+                        echo "実行コマンド: sudo dnf update"
+                    fi
+                    return 0
+                fi
+                
+                if confirm_update "dnf" "$package"; then
+                    if [[ -n "$package" ]]; then
+                        print_info "dnf で $package をアップデートしています..."
+                        if sudo dnf update "$package" 2>/dev/null; then
+                            print_success "dnf: $package のアップデートが完了しました"
+                        else
+                            print_error "dnf: $package のアップデートに失敗しました"
+                        fi
+                    else
+                        print_info "dnf で全パッケージをアップデートしています..."
+                        if sudo dnf update 2>/dev/null; then
+                            print_success "dnf: 全パッケージのアップデートが完了しました"
+                        else
+                            print_error "dnf: アップデートに失敗しました"
+                        fi
+                    fi
+                fi
+            else
+                print_warning "dnfが見つかりません"
+            fi
+            ;;
+        yum)
+            if check_command yum; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    if [[ -n "$package" ]]; then
+                        echo "実行コマンド: sudo yum update $package"
+                    else
+                        echo "実行コマンド: sudo yum update"
+                    fi
+                    return 0
+                fi
+                
+                if confirm_update "yum" "$package"; then
+                    if [[ -n "$package" ]]; then
+                        print_info "yum で $package をアップデートしています..."
+                        if sudo yum update "$package" 2>/dev/null; then
+                            print_success "yum: $package のアップデートが完了しました"
+                        else
+                            print_error "yum: $package のアップデートに失敗しました"
+                        fi
+                    else
+                        print_info "yum で全パッケージをアップデートしています..."
+                        if sudo yum update 2>/dev/null; then
+                            print_success "yum: 全パッケージのアップデートが完了しました"
+                        else
+                            print_error "yum: アップデートに失敗しました"
+                        fi
+                    fi
+                fi
+            else
+                print_warning "yumが見つかりません"
+            fi
+            ;;
+        apt)
+            if check_command apt; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    if [[ -n "$package" ]]; then
+                        echo "実行コマンド: sudo apt update && sudo apt upgrade $package"
+                    else
+                        echo "実行コマンド: sudo apt update && sudo apt upgrade"
+                    fi
+                    return 0
+                fi
+                
+                if confirm_update "apt" "$package"; then
+                    print_info "apt でパッケージリストを更新しています..."
+                    sudo apt update 2>/dev/null
+                    
+                    if [[ -n "$package" ]]; then
+                        print_info "apt で $package をアップデートしています..."
+                        if sudo apt upgrade "$package" 2>/dev/null; then
+                            print_success "apt: $package のアップデートが完了しました"
+                        else
+                            print_error "apt: $package のアップデートに失敗しました"
+                        fi
+                    else
+                        print_info "apt で全パッケージをアップデートしています..."
+                        if sudo apt upgrade 2>/dev/null; then
+                            print_success "apt: 全パッケージのアップデートが完了しました"
+                        else
+                            print_error "apt: アップデートに失敗しました"
+                        fi
+                    fi
+                fi
+            else
+                print_warning "aptが見つかりません"
+            fi
+            ;;
+        *)
+            print_warning "$manager: アップデートに対応していません"
+            ;;
+    esac
+}
+
+# 結果を JSON 形式で出力
+output_json() {
+    local data="$1"
+    echo "{"
+    echo "  \"timestamp\": \"$(date -Iseconds)\","
+    echo "  \"packages\": ["
+    
+    local first=true
+    while IFS=',' read -r manager package; do
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            echo ","
+        fi
+        echo -n "    {\"manager\": \"$manager\", \"package\": \"$package\"}"
+    done <<< "$data"
+    
+    echo ""
+    echo "  ]"
+    echo "}"
+}
+
+# 結果を CSV 形式で出力
+output_csv() {
+    local data="$1"
+    echo "Manager,Package"
+    echo "$data"
+}
+
+# 結果をテーブル形式で出力
+output_table() {
+    local data="$1"
+    
+    if [[ "$COUNT_ONLY" == "true" ]]; then
+        printf "${BLUE}%-10s${NC} ${GREEN}%s${NC}\n" "Manager" "Count"
+        printf "%-10s %s\n" "----------" "-----"
+        while IFS=',' read -r manager count; do
+            printf "%-10s %s\n" "$manager" "$count"
+        done <<< "$data"
+    else
+        printf "${BLUE}%-10s${NC} ${GREEN}%s${NC}\n" "Manager" "Package"
+        printf "%-10s %s\n" "----------" "-------"
+        while IFS=',' read -r manager package; do
+            printf "%-10s %s\n" "$manager" "$package"
+        done <<< "$data"
+    fi
+}
+
+# メイン処理
+main() {
+    # パッケージ情報モードの処理
+    if [[ "$INFO_MODE" == "true" ]]; then
+        if [[ -z "$PACKAGE_NAME" ]]; then
+            print_error "パッケージ名が指定されていません"
+            exit 1
+        fi
+        
+        local managers=()
+        if [[ ${#REQUESTED_MANAGERS[@]} -eq 0 ]]; then
+            # デフォルトでは主要なパッケージマネージャーのみ
+            managers=("brew" "npm" "pip3" "gem" "cargo" "dnf" "yum" "apt" "dpkg" "rpm" "perl" "go")
+        else
+            managers=("${REQUESTED_MANAGERS[@]}")
+        fi
+        
+        for manager in "${managers[@]}"; do
+            echo -e "${BLUE}=== $manager ===${NC}"
+            case "$manager" in
+                brew) get_brew_info "$PACKAGE_NAME" ;;
+                npm) get_npm_info "$PACKAGE_NAME" ;;
+                pip3) get_pip3_info "$PACKAGE_NAME" ;;
+                gem) get_gem_info "$PACKAGE_NAME" ;;
+                cargo) get_cargo_info "$PACKAGE_NAME" ;;
+                dnf) get_dnf_info "$PACKAGE_NAME" ;;
+                yum) get_yum_info "$PACKAGE_NAME" ;;
+                apt) get_apt_info "$PACKAGE_NAME" ;;
+                dpkg) get_dpkg_info "$PACKAGE_NAME" ;;
+                rpm) get_rpm_info "$PACKAGE_NAME" ;;
+                perl) get_perl_info "$PACKAGE_NAME" ;;
+                go) get_go_info "$PACKAGE_NAME" ;;
+                nvm|rbenv|pyenv|nodenv|tfenv|jenv|asdf|gvm|rustup) 
+                    get_version_manager_info "$manager" "$PACKAGE_NAME" ;;
+                *) print_warning "パッケージ情報取得に対応していないマネージャー: $manager" ;;
+            esac
+            echo ""
+        done
+        return 0
+    fi
+    
+    # パッケージアンインストールモードの処理
+    if [[ "$DELETE_MODE" == "true" ]]; then
+        if [[ -z "$PACKAGE_NAME" ]]; then
+            print_error "パッケージ名が指定されていません"
+            exit 1
+        fi
+        
+        local managers=()
+        if [[ ${#REQUESTED_MANAGERS[@]} -eq 0 ]]; then
+            # デフォルトでは主要なパッケージマネージャーのみ
+            managers=("brew" "npm" "pip3" "gem" "cargo" "dnf" "yum" "apt" "dpkg" "rpm")
+        else
+            managers=("${REQUESTED_MANAGERS[@]}")
+        fi
+        
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo -e "${BLUE}ドライランモード: 実際の操作は行いません${NC}"
+            echo ""
+        fi
+        
+        for manager in "${managers[@]}"; do
+            echo -e "${BLUE}=== $manager ===${NC}"
+            case "$manager" in
+                brew) uninstall_brew_package "$PACKAGE_NAME" ;;
+                npm) uninstall_npm_package "$PACKAGE_NAME" ;;
+                pip3) uninstall_pip3_package "$PACKAGE_NAME" ;;
+                gem) uninstall_gem_package "$PACKAGE_NAME" ;;
+                cargo) uninstall_cargo_package "$PACKAGE_NAME" ;;
+                dnf) uninstall_dnf_package "$PACKAGE_NAME" ;;
+                yum) uninstall_yum_package "$PACKAGE_NAME" ;;
+                apt) uninstall_apt_package "$PACKAGE_NAME" ;;
+                dpkg) uninstall_dpkg_package "$PACKAGE_NAME" ;;
+                rpm) uninstall_rpm_package "$PACKAGE_NAME" ;;
+                nvm|rbenv|pyenv|nodenv|tfenv|jenv|asdf|gvm|rustup) 
+                    uninstall_version_manager "$manager" "$PACKAGE_NAME" ;;
+                *) print_warning "アンインストールに対応していないマネージャー: $manager" ;;
+            esac
+            echo ""
+        done
+        return 0
+    fi
+    
+    # パッケージアップデートモードの処理
+    if [[ "$UPDATE_MODE" == "true" ]]; then
+        local managers=()
+        if [[ ${#REQUESTED_MANAGERS[@]} -eq 0 ]]; then
+            # デフォルトでは主要なパッケージマネージャーのみ
+            managers=("brew" "npm" "pip3" "gem" "cargo" "dnf" "yum" "apt")
+        else
+            managers=("${REQUESTED_MANAGERS[@]}")
+        fi
+        
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo -e "${BLUE}ドライランモード: 実際の操作は行いません${NC}"
+            echo ""
+        fi
+        
+        for manager in "${managers[@]}"; do
+            echo -e "${BLUE}=== $manager ===${NC}"
+            case "$manager" in
+                brew) update_brew_packages "$PACKAGE_NAME" ;;
+                npm) update_npm_packages "$PACKAGE_NAME" ;;
+                pip3) update_pip3_packages "$PACKAGE_NAME" ;;
+                gem) update_gem_packages "$PACKAGE_NAME" ;;
+                cargo) update_cargo_packages "$PACKAGE_NAME" ;;
+                dnf|yum|apt) update_system_packages "$manager" "$PACKAGE_NAME" ;;
+                *) print_warning "アップデートに対応していないマネージャー: $manager" ;;
+            esac
+            echo ""
+        done
+        return 0
+    fi
+    
+    local all_data=""
+    local managers=()
+    
+    # 実行するパッケージマネージャーを決定
+    if [[ ${#REQUESTED_MANAGERS[@]} -eq 0 ]]; then
+        managers=("brew" "npm" "perl" "pip3" "gem" "cargo" "go" "dnf" "yum" "apt" "dpkg" "rpm" "nvm" "rbenv" "pyenv" "nodenv" "tfenv" "jenv" "asdf" "gvm" "rustup")
+    else
+        managers=("${REQUESTED_MANAGERS[@]}")
+    fi
+    
+    # 各パッケージマネージャーからデータを取得
+    for manager in "${managers[@]}"; do
+        case "$manager" in
+            brew)
+                local brew_data=$(get_brew_packages)
+                if [[ -n "$brew_data" ]]; then
+                    all_data="${all_data}${brew_data}\n"
+                fi
+                ;;
+            npm)
+                local npm_data=$(get_npm_packages)
+                if [[ -n "$npm_data" ]]; then
+                    all_data="${all_data}${npm_data}\n"
+                fi
+                ;;
+            cpan)
+                local cpan_data=$(get_cpan_packages)
+                if [[ -n "$cpan_data" ]]; then
+                    all_data="${all_data}${cpan_data}\n"
+                fi
+                ;;
+            perl)
+                local perl_data=$(get_perl_packages)
+                if [[ -n "$perl_data" ]]; then
+                    all_data="${all_data}${perl_data}\n"
+                fi
+                ;;
+            pip3)
+                local pip3_data=$(get_pip3_packages)
+                if [[ -n "$pip3_data" ]]; then
+                    all_data="${all_data}${pip3_data}\n"
+                fi
+                ;;
+            gem)
+                local gem_data=$(get_gem_packages)
+                if [[ -n "$gem_data" ]]; then
+                    all_data="${all_data}${gem_data}\n"
+                fi
+                ;;
+            cargo)
+                local cargo_data=$(get_cargo_packages)
+                if [[ -n "$cargo_data" ]]; then
+                    all_data="${all_data}${cargo_data}\n"
+                fi
+                ;;
+            go)
+                local go_data=$(get_go_packages)
+                if [[ -n "$go_data" ]]; then
+                    all_data="${all_data}${go_data}\n"
+                fi
+                ;;
+            dnf)
+                local dnf_data=$(get_dnf_packages)
+                if [[ -n "$dnf_data" ]]; then
+                    all_data="${all_data}${dnf_data}\n"
+                fi
+                ;;
+            yum)
+                local yum_data=$(get_yum_packages)
+                if [[ -n "$yum_data" ]]; then
+                    all_data="${all_data}${yum_data}\n"
+                fi
+                ;;
+            apt)
+                local apt_data=$(get_apt_packages)
+                if [[ -n "$apt_data" ]]; then
+                    all_data="${all_data}${apt_data}\n"
+                fi
+                ;;
+            dpkg)
+                local dpkg_data=$(get_dpkg_packages)
+                if [[ -n "$dpkg_data" ]]; then
+                    all_data="${all_data}${dpkg_data}\n"
+                fi
+                ;;
+            rpm)
+                local rpm_data=$(get_rpm_packages)
+                if [[ -n "$rpm_data" ]]; then
+                    all_data="${all_data}${rpm_data}\n"
+                fi
+                ;;
+            nvm)
+                local nvm_data=$(get_nvm_packages)
+                if [[ -n "$nvm_data" ]]; then
+                    all_data="${all_data}${nvm_data}\n"
+                fi
+                ;;
+            rbenv)
+                local rbenv_data=$(get_rbenv_packages)
+                if [[ -n "$rbenv_data" ]]; then
+                    all_data="${all_data}${rbenv_data}\n"
+                fi
+                ;;
+            pyenv)
+                local pyenv_data=$(get_pyenv_packages)
+                if [[ -n "$pyenv_data" ]]; then
+                    all_data="${all_data}${pyenv_data}\n"
+                fi
+                ;;
+            nodenv)
+                local nodenv_data=$(get_nodenv_packages)
+                if [[ -n "$nodenv_data" ]]; then
+                    all_data="${all_data}${nodenv_data}\n"
+                fi
+                ;;
+            tfenv)
+                local tfenv_data=$(get_tfenv_packages)
+                if [[ -n "$tfenv_data" ]]; then
+                    all_data="${all_data}${tfenv_data}\n"
+                fi
+                ;;
+            jenv)
+                local jenv_data=$(get_jenv_packages)
+                if [[ -n "$jenv_data" ]]; then
+                    all_data="${all_data}${jenv_data}\n"
+                fi
+                ;;
+            asdf)
+                local asdf_data=$(get_asdf_packages)
+                if [[ -n "$asdf_data" ]]; then
+                    all_data="${all_data}${asdf_data}\n"
+                fi
+                ;;
+            gvm)
+                local gvm_data=$(get_gvm_packages)
+                if [[ -n "$gvm_data" ]]; then
+                    all_data="${all_data}${gvm_data}\n"
+                fi
+                ;;
+            rustup)
+                local rustup_data=$(get_rustup_packages)
+                if [[ -n "$rustup_data" ]]; then
+                    all_data="${all_data}${rustup_data}\n"
+                fi
+                ;;
+            *)
+                print_error "未知のパッケージマネージャー: $manager"
+                ;;
+        esac
+    done
+    
+    # データを整理
+    all_data=$(echo -e "$all_data" | grep -v "^$" | sort)
+    
+    if [[ -z "$all_data" ]]; then
+        print_warning "パッケージが見つかりませんでした"
+        exit 1
+    fi
+    
+    # フォーマットに応じて出力
+    local output=""
+    case "$OUTPUT_FORMAT" in
+        json)
+            output=$(output_json "$all_data")
+            ;;
+        csv)
+            output=$(output_csv "$all_data")
+            ;;
+        table)
+            output=$(output_table "$all_data")
+            ;;
+        *)
+            print_error "不明な出力フォーマット: $OUTPUT_FORMAT"
+            exit 1
+            ;;
+    esac
+    
+    # 出力先を決定
+    if [[ -n "$OUTPUT_FILE" ]]; then
+        echo "$output" > "$OUTPUT_FILE"
+        print_success "結果を $OUTPUT_FILE に保存しました"
+    else
+        echo "$output"
+    fi
+}
+
+# スクリプト実行
+main "$@"
