@@ -23,6 +23,9 @@
 - gitにリモートリポジトリを作成してプッシュしてください
 - コーディング規約に従ってコメントをつけてください
 - unipkgのコメント形式 /* */ はbashで使用できない形式です # に修正してください
+- 一覧表示の時にバージョン番号も表示したい
+- npmでanthropic-ai/claude-code@1.0.35とバージョン表示されているのは、パッケージ名 anthropic-ai/claude-code, バージョン 1.0.35 が正しいです
+- バージョン表示機能（-v, --with-version）が実装されました
 
 ## 対応パッケージマネージャー
 
@@ -80,8 +83,17 @@ chmod +x unipkg
 # バージョン管理マネージャーのみ表示
 ./unipkg nvm pyenv rbenv
 
+# バージョン情報も表示
+./unipkg -v
+
+# 特定のパッケージマネージャーでバージョン情報を表示
+./unipkg brew -v
+
 # JSON形式で出力
 ./unipkg -f json
+
+# バージョン情報付きでJSON形式で出力
+./unipkg -v -f json
 
 # パッケージの詳細情報を表示
 ./unipkg -i git
@@ -119,6 +131,9 @@ chmod +x unipkg
 # CSV形式でファイルに出力
 ./unipkg -f csv -o packages.csv
 
+# バージョン情報付きでCSV形式で出力
+./unipkg -v -f csv -o packages_with_versions.csv
+
 # 色の出力を無効にする
 ./unipkg --no-color
 ```
@@ -129,6 +144,7 @@ chmod +x unipkg
 - `-f, --format FORMAT`: 出力フォーマット (table|json|csv) [デフォルト: table]
 - `-o, --output FILE`: 結果をファイルに出力
 - `-c, --count`: パッケージ数のみを表示
+- `-v, --with-version`: バージョン情報も表示
 - `-i, --info PACKAGE`: 指定したパッケージの詳細情報を表示
 - `-d, --delete PACKAGE`: 指定したパッケージを削除
 - `-u, --update [PACKAGE]`: 全パッケージまたは指定パッケージをアップデート
@@ -147,6 +163,17 @@ brew       git
 npm        @vue/cli
 pip3       requests
 gem        bundler
+```
+
+### バージョン情報付きテーブル形式
+```
+Manager      Package                        Version
+------------ ------------------------------ -------
+brew         bat                            0.25.0_1
+brew         git                            2.50.0
+npm          @anthropic-ai/claude-code      1.0.35
+pip3         requests                       2.31.0
+gem          bundler                        2.4.10
 ```
 
 ### カウントモード
@@ -170,6 +197,34 @@ gem        48
     {"manager": "npm", "package": "@vue/cli"}
   ]
 }
+```
+
+### バージョン情報付きJSON形式
+```json
+{
+  "timestamp": "2025-06-30T17:46:02+09:00",
+  "packages": [
+    {"manager": "brew", "package": "bat", "version": "0.25.0_1"},
+    {"manager": "npm", "package": "@anthropic-ai/claude-code", "version": "1.0.35"},
+    {"manager": "pip3", "package": "requests", "version": "2.31.0"}
+  ]
+}
+```
+
+### CSV形式
+```
+Manager,Package
+brew,bat
+npm,@vue/cli
+pip3,requests
+```
+
+### バージョン情報付きCSV形式
+```
+Manager,Package,Version
+brew,bat,0.25.0_1
+npm,@anthropic-ai/claude-code,1.0.35
+pip3,requests,2.31.0
 ```
 
 ### パッケージ情報表示
