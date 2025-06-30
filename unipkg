@@ -28,6 +28,7 @@ show_help() {
     -f, --format FORMAT 出力フォーマット (table|json|csv) [デフォルト: table]
     -o, --output FILE   結果をファイルに出力
     -c, --count         パッケージ数のみを表示
+    -v, --with-version  バージョン情報も表示
     -i, --info PACKAGE  指定したパッケージの詳細情報を表示
     -d, --delete PACKAGE     指定したパッケージを削除
     -u, --update [PACKAGE]  全パッケージまたは指定パッケージをアップデート
@@ -82,6 +83,7 @@ EOF
 OUTPUT_FORMAT="table"
 OUTPUT_FILE=""
 COUNT_ONLY=false
+WITH_VERSION=false
 INFO_MODE=false
 DELETE_MODE=false
 UPDATE_MODE=false
@@ -111,6 +113,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -c|--count)
             COUNT_ONLY=true
+            shift
+            ;;
+        -v|--with-version)
+            WITH_VERSION=true
             shift
             ;;
         -i|--info)
@@ -213,16 +219,31 @@ print_success() {
 get_brew_packages() {
     if check_command brew; then
         local packages
-        # formulaオプションでcaskを除外し、アプリケーションパッケージのみ取得
-        packages=$(brew list --formula 2>/dev/null | sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(brew list --formula --versions 2>/dev/null | sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(brew list --formula 2>/dev/null | sort)
+        fi
+        
         # wc -lの結果は先頭にスペースが入ることがあるためtrで除去
         local count=$(echo "$packages" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "brew,$count"
         else
-            # CSV形式で出力（manager,package）
-            echo "$packages" | while read -r package; do
-                echo "brew,$package"
+            # CSV形式で出力
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # パッケージ名とバージョンを分離
+                        local package=$(echo "$line" | awk '{print $1}')
+                        local version=$(echo "$line" | awk '{print $2}')
+                        echo "brew,$package,${version:-N/A}"
+                    else
+                        echo "brew,$line"
+                    fi
+                fi
             done
         fi
     else
@@ -239,18 +260,41 @@ get_brew_packages() {
 get_npm_packages() {
     if check_command npm; then
         local packages
-        packages=$(npm list -g --depth=0 --parseable 2>/dev/null | \
-                  grep -v "^/opt/homebrew/lib$" | \
-                  sed 's|.*/||' | \
-                  grep -v "^$" | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得（テキスト形式）
+            packages=$(npm list -g --depth=0 2>/dev/null | \
+                      grep -E "^[├└]" | \
+                      sed 's/[├└─│ ]*//g' | \
+                      grep -v "^$" | \
+                      grep -v "(empty)" | \
+                      sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(npm list -g --depth=0 --parseable 2>/dev/null | \
+                      grep -v "^/opt/homebrew/lib$" | \
+                      sed 's|.*/||' | \
+                      grep -v "^$" | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "npm,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "npm,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # パッケージ名@バージョン形式を分離
+                        if [[ "$line" == *"@"* ]]; then
+                            local package=$(echo "$line" | cut -d'@' -f1)
+                            local version=$(echo "$line" | cut -d'@' -f2-)
+                            echo "npm,$package,${version:-N/A}"
+                        else
+                            echo "npm,$line,N/A"
+                        fi
+                    else
+                        echo "npm,$line"
+                    fi
                 fi
             done
         fi
@@ -297,17 +341,33 @@ get_cpan_packages() {
 get_pip3_packages() {
     if check_command pip3; then
         local packages
-        packages=$(pip3 list --format=freeze 2>/dev/null | \
-                  cut -d'=' -f1 | \
-                  grep -v "^$" | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(pip3 list --format=freeze 2>/dev/null | \
+                      grep -v "^$" | \
+                      sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(pip3 list --format=freeze 2>/dev/null | \
+                      cut -d'=' -f1 | \
+                      grep -v "^$" | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "pip3,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "pip3,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package==version形式を分離
+                        local package=$(echo "$line" | cut -d'=' -f1)
+                        local version=$(echo "$line" | cut -d'=' -f3)
+                        echo "pip3,$package,${version:-N/A}"
+                    else
+                        echo "pip3,$line"
+                    fi
                 fi
             done
         fi
@@ -323,16 +383,32 @@ get_pip3_packages() {
 get_gem_packages() {
     if check_command gem; then
         local packages
-        packages=$(gem list --no-versions 2>/dev/null | \
-                  grep -v "^$" | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(gem list 2>/dev/null | \
+                      grep -v "^$" | \
+                      sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(gem list --no-versions 2>/dev/null | \
+                      grep -v "^$" | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "gem,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "gem,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package (version)形式を分離
+                        local package=$(echo "$line" | awk '{print $1}')
+                        local version=$(echo "$line" | sed 's/.*(\([^)]*\)).*/\1/')
+                        echo "gem,$package,${version:-N/A}"
+                    else
+                        echo "gem,$line"
+                    fi
                 fi
             done
         fi
@@ -348,18 +424,34 @@ get_gem_packages() {
 get_cargo_packages() {
     if check_command cargo; then
         local packages
-        packages=$(cargo install --list 2>/dev/null | \
-                  grep -v ":" | \
-                  awk '{print $1}' | \
-                  grep -v "^$" | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(cargo install --list 2>/dev/null | \
+                      grep "v[0-9]" | \
+                      sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(cargo install --list 2>/dev/null | \
+                      grep -v ":" | \
+                      awk '{print $1}' | \
+                      grep -v "^$" | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "cargo,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "cargo,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package v1.0.0:形式を分離
+                        local package=$(echo "$line" | awk '{print $1}')
+                        local version=$(echo "$line" | sed 's/.*v\([^:]*\):.*/\1/')
+                        echo "cargo,$package,${version:-N/A}"
+                    else
+                        echo "cargo,$line"
+                    fi
                 fi
             done
         fi
@@ -1660,14 +1752,25 @@ output_json() {
     echo "  \"packages\": ["
     
     local first=true
-    while IFS=',' read -r manager package; do
-        if [[ "$first" == "true" ]]; then
-            first=false
-        else
-            echo ","
-        fi
-        echo -n "    {\"manager\": \"$manager\", \"package\": \"$package\"}"
-    done <<< "$data"
+    if [[ "$WITH_VERSION" == "true" ]]; then
+        while IFS=',' read -r manager package version; do
+            if [[ "$first" == "true" ]]; then
+                first=false
+            else
+                echo ","
+            fi
+            echo -n "    {\"manager\": \"$manager\", \"package\": \"$package\", \"version\": \"$version\"}"
+        done <<< "$data"
+    else
+        while IFS=',' read -r manager package; do
+            if [[ "$first" == "true" ]]; then
+                first=false
+            else
+                echo ","
+            fi
+            echo -n "    {\"manager\": \"$manager\", \"package\": \"$package\"}"
+        done <<< "$data"
+    fi
     
     echo ""
     echo "  ]"
@@ -1680,7 +1783,11 @@ output_json() {
 #   $1 - CSV形式のパッケージデータ
 output_csv() {
     local data="$1"
-    echo "Manager,Package"
+    if [[ "$WITH_VERSION" == "true" ]]; then
+        echo "Manager,Package,Version"
+    else
+        echo "Manager,Package"
+    fi
     echo "$data"
 }
 
@@ -1699,11 +1806,19 @@ output_table() {
             printf "%-10s %s\n" "$manager" "$count"
         done <<< "$data"
     else
-        printf "${BLUE}%-10s${NC} ${GREEN}%s${NC}\n" "Manager" "Package"
-        printf "%-10s %s\n" "----------" "-------"
-        while IFS=',' read -r manager package; do
-            printf "%-10s %s\n" "$manager" "$package"
-        done <<< "$data"
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            printf "${BLUE}%-12s${NC} ${GREEN}%-30s${NC} ${YELLOW}%s${NC}\n" "Manager" "Package" "Version"
+            printf "%-12s %-30s %s\n" "------------" "------------------------------" "-------"
+            while IFS=',' read -r manager package version; do
+                printf "%-12s %-30s %s\n" "$manager" "$package" "$version"
+            done <<< "$data"
+        else
+            printf "${BLUE}%-10s${NC} ${GREEN}%s${NC}\n" "Manager" "Package"
+            printf "%-10s %s\n" "----------" "-------"
+            while IFS=',' read -r manager package; do
+                printf "%-10s %s\n" "$manager" "$package"
+            done <<< "$data"
+        fi
     fi
 }
 
