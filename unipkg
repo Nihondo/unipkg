@@ -311,16 +311,40 @@ get_npm_packages() {
 get_perl_packages() {
     if command -v perl >/dev/null 2>&1; then
         local packages
-        packages=$(perl -MExtUtils::Installed -e 'my $inst = ExtUtils::Installed->new(); print join("\n", $inst->modules());' 2>/dev/null | \
-                  grep -v "^Perl$" | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(perl -MExtUtils::Installed -e '
+                my $inst = ExtUtils::Installed->new();
+                my @modules = $inst->modules();
+                foreach my $module (@modules) {
+                    next if $module eq "Perl";
+                    eval {
+                        my $version = $inst->version($module) || "unknown";
+                        print "$module,$version\n";
+                    };
+                }
+            ' 2>/dev/null | sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(perl -MExtUtils::Installed -e 'my $inst = ExtUtils::Installed->new(); print join("\n", $inst->modules());' 2>/dev/null | \
+                      grep -v "^Perl$" | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "perl,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "perl,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # module,version形式を分離
+                        local package=$(echo "$line" | cut -d',' -f1)
+                        local version=$(echo "$line" | cut -d',' -f2)
+                        echo "perl,$package,$version"
+                    else
+                        echo "perl,$line"
+                    fi
                 fi
             done
         fi
@@ -405,7 +429,7 @@ get_gem_packages() {
                     if [[ "$WITH_VERSION" == "true" ]]; then
                         # package (version)形式を分離
                         local package=$(echo "$line" | awk '{print $1}')
-                        local version=$(echo "$line" | sed 's/.*(\([^)]*\)).*/\1/')
+                        local version=$(echo "$line" | sed 's/.*(\([^)]*\)).*/\1/' | sed 's/,.*$//' | sed 's/^default: //')
                         echo "gem,$package,${version:-N/A}"
                     else
                         echo "gem,$line"
@@ -472,20 +496,42 @@ get_go_packages() {
         
         # GOPATHが設定されている場合、そこからパッケージを探す
         if [[ -n "${GOPATH:-}" ]] && [[ -d "$GOPATH/pkg/mod" ]]; then
-            packages=$(find "$GOPATH/pkg/mod" -maxdepth 2 -type d 2>/dev/null | \
-                      grep -v "cache" | \
-                      sed "s|$GOPATH/pkg/mod/||" | \
-                      grep "/" | \
-                      sort | \
-                      uniq)
+            if [[ "$WITH_VERSION" == "true" ]]; then
+                # バージョン情報付き（パッケージ@バージョン形式）
+                packages=$(find "$GOPATH/pkg/mod" -maxdepth 1 -type d 2>/dev/null | \
+                          grep -v "cache" | \
+                          sed "s|$GOPATH/pkg/mod/||" | \
+                          grep "@" | \
+                          sort | \
+                          uniq)
+            else
+                # パッケージ名のみ
+                packages=$(find "$GOPATH/pkg/mod" -maxdepth 2 -type d 2>/dev/null | \
+                          grep -v "cache" | \
+                          sed "s|$GOPATH/pkg/mod/||" | \
+                          grep "/" | \
+                          sort | \
+                          uniq)
+            fi
             count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         elif [[ -d "$HOME/go/pkg/mod" ]]; then
-            packages=$(find "$HOME/go/pkg/mod" -maxdepth 2 -type d 2>/dev/null | \
-                      grep -v "cache" | \
-                      sed "s|$HOME/go/pkg/mod/||" | \
-                      grep "/" | \
-                      sort | \
-                      uniq)
+            if [[ "$WITH_VERSION" == "true" ]]; then
+                # バージョン情報付き（パッケージ@バージョン形式）
+                packages=$(find "$HOME/go/pkg/mod" -maxdepth 1 -type d 2>/dev/null | \
+                          grep -v "cache" | \
+                          sed "s|$HOME/go/pkg/mod/||" | \
+                          grep "@" | \
+                          sort | \
+                          uniq)
+            else
+                # パッケージ名のみ
+                packages=$(find "$HOME/go/pkg/mod" -maxdepth 2 -type d 2>/dev/null | \
+                          grep -v "cache" | \
+                          sed "s|$HOME/go/pkg/mod/||" | \
+                          grep "/" | \
+                          sort | \
+                          uniq)
+            fi
             count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         fi
         
@@ -493,9 +539,16 @@ get_go_packages() {
             echo "go,$count"
         else
             if [[ -n "$packages" ]]; then
-                echo "$packages" | while read -r package; do
-                    if [[ -n "$package" ]]; then
-                        echo "go,$package"
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
+                        if [[ "$WITH_VERSION" == "true" ]]; then
+                            # package@version形式を分離
+                            local package=$(echo "$line" | cut -d'@' -f1)
+                            local version=$(echo "$line" | cut -d'@' -f2-)
+                            echo "go,$package,$version"
+                        else
+                            echo "go,$line"
+                        fi
                     fi
                 done
             fi
@@ -512,19 +565,36 @@ get_go_packages() {
 get_dnf_packages() {
     if check_command dnf; then
         local packages
-        packages=$(dnf list installed 2>/dev/null | \
-                  tail -n +2 | \
-                  awk '{print $1}' | \
-                  sed 's/\.[^.]*$//' | \
-                  sort | \
-                  uniq)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(dnf list installed 2>/dev/null | \
+                      tail -n +2 | \
+                      sort | \
+                      uniq)
+        else
+            # パッケージ名のみ取得
+            packages=$(dnf list installed 2>/dev/null | \
+                      tail -n +2 | \
+                      awk '{print $1}' | \
+                      sed 's/\.[^.]*$//' | \
+                      sort | \
+                      uniq)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "dnf,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "dnf,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package.arch version repo 形式を分離
+                        local package=$(echo "$line" | awk '{print $1}' | sed 's/\.[^.]*$//')
+                        local version=$(echo "$line" | awk '{print $2}')
+                        echo "dnf,$package,$version"
+                    else
+                        echo "dnf,$line"
+                    fi
                 fi
             done
         fi
@@ -540,19 +610,36 @@ get_dnf_packages() {
 get_yum_packages() {
     if check_command yum; then
         local packages
-        packages=$(yum list installed 2>/dev/null | \
-                  tail -n +2 | \
-                  awk '{print $1}' | \
-                  sed 's/\.[^.]*$//' | \
-                  sort | \
-                  uniq)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(yum list installed 2>/dev/null | \
+                      tail -n +2 | \
+                      sort | \
+                      uniq)
+        else
+            # パッケージ名のみ取得
+            packages=$(yum list installed 2>/dev/null | \
+                      tail -n +2 | \
+                      awk '{print $1}' | \
+                      sed 's/\.[^.]*$//' | \
+                      sort | \
+                      uniq)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "yum,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "yum,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package.arch version repo 形式を分離
+                        local package=$(echo "$line" | awk '{print $1}' | sed 's/\.[^.]*$//')
+                        local version=$(echo "$line" | awk '{print $2}')
+                        echo "yum,$package,$version"
+                    else
+                        echo "yum,$line"
+                    fi
                 fi
             done
         fi
@@ -568,18 +655,35 @@ get_yum_packages() {
 get_apt_packages() {
     if check_command apt; then
         local packages
-        packages=$(apt list --installed 2>/dev/null | \
-                  grep -v "WARNING" | \
-                  tail -n +2 | \
-                  awk -F'/' '{print $1}' | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(apt list --installed 2>/dev/null | \
+                      grep -v "WARNING" | \
+                      tail -n +2 | \
+                      sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(apt list --installed 2>/dev/null | \
+                      grep -v "WARNING" | \
+                      tail -n +2 | \
+                      awk -F'/' '{print $1}' | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "apt,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "apt,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package/release,now version arch [status]形式を分離
+                        local package=$(echo "$line" | awk -F'/' '{print $1}')
+                        local version=$(echo "$line" | awk '{print $2}' | cut -d' ' -f1)
+                        echo "apt,$package,$version"
+                    else
+                        echo "apt,$line"
+                    fi
                 fi
             done
         fi
@@ -595,17 +699,33 @@ get_apt_packages() {
 get_dpkg_packages() {
     if check_command dpkg; then
         local packages
-        packages=$(dpkg -l 2>/dev/null | \
-                  grep "^ii" | \
-                  awk '{print $2}' | \
-                  sort)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(dpkg -l 2>/dev/null | \
+                      grep "^ii" | \
+                      sort)
+        else
+            # パッケージ名のみ取得
+            packages=$(dpkg -l 2>/dev/null | \
+                      grep "^ii" | \
+                      awk '{print $2}' | \
+                      sort)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "dpkg,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "dpkg,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # ii package version arch description形式を分離
+                        local package=$(echo "$line" | awk '{print $2}')
+                        local version=$(echo "$line" | awk '{print $3}')
+                        echo "dpkg,$package,$version"
+                    else
+                        echo "dpkg,$line"
+                    fi
                 fi
             done
         fi
@@ -621,16 +741,32 @@ get_dpkg_packages() {
 get_rpm_packages() {
     if check_command rpm; then
         local packages
-        packages=$(rpm -qa --queryformat '%{NAME}\n' 2>/dev/null | \
-                  sort | \
-                  uniq)
+        if [[ "$WITH_VERSION" == "true" ]]; then
+            # バージョン情報付きで取得
+            packages=$(rpm -qa --queryformat '%{NAME} %{VERSION}-%{RELEASE}\n' 2>/dev/null | \
+                      sort | \
+                      uniq)
+        else
+            # パッケージ名のみ取得
+            packages=$(rpm -qa --queryformat '%{NAME}\n' 2>/dev/null | \
+                      sort | \
+                      uniq)
+        fi
+        
         local count=$(echo "$packages" | grep -v "^$" | wc -l | tr -d ' ')
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "rpm,$count"
         else
-            echo "$packages" | while read -r package; do
-                if [[ -n "$package" ]]; then
-                    echo "rpm,$package"
+            echo "$packages" | while read -r line; do
+                if [[ -n "$line" ]]; then
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # package version-release形式を分離
+                        local package=$(echo "$line" | awk '{print $1}')
+                        local version=$(echo "$line" | awk '{print $2}')
+                        echo "rpm,$package,$version"
+                    else
+                        echo "rpm,$line"
+                    fi
                 fi
             done
         fi
@@ -653,7 +789,12 @@ get_nvm_packages() {
         else
             echo "$packages" | while read -r package; do
                 if [[ -n "$package" ]]; then
-                    echo "nvm,$package"
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # Node.jsバージョン管理の場合、パッケージ名としてNode.jsを、バージョンとして各バージョンを表示
+                        echo "nvm,Node.js,$package"
+                    else
+                        echo "nvm,$package"
+                    fi
                 fi
             done
         fi
@@ -680,7 +821,12 @@ get_rbenv_packages() {
         else
             echo "$packages" | while read -r package; do
                 if [[ -n "$package" ]]; then
-                    echo "rbenv,$package"
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # Rubyバージョン管理の場合、パッケージ名としてRubyを、バージョンとして各バージョンを表示
+                        echo "rbenv,Ruby,$package"
+                    else
+                        echo "rbenv,$package"
+                    fi
                 fi
             done
         fi
@@ -707,7 +853,12 @@ get_pyenv_packages() {
         else
             echo "$packages" | while read -r package; do
                 if [[ -n "$package" ]]; then
-                    echo "pyenv,$package"
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # Pythonバージョン管理の場合
+                        echo "pyenv,Python,$package"
+                    else
+                        echo "pyenv,$package"
+                    fi
                 fi
             done
         fi
@@ -874,7 +1025,12 @@ get_rustup_packages() {
         else
             echo "$packages" | while read -r package; do
                 if [[ -n "$package" ]]; then
-                    echo "rustup,$package"
+                    if [[ "$WITH_VERSION" == "true" ]]; then
+                        # Rustツールチェーン管理の場合
+                        echo "rustup,Rust,$package"
+                    else
+                        echo "rustup,$package"
+                    fi
                 fi
             done
         fi
