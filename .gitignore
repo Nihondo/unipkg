@@ -1,0 +1,17 @@
+# 作業日報ファイル
+作業日報-*.md
+
+# 一時ファイル
+*.tmp
+*.temp
+
+# OS固有ファイル
+.DS_Store
+Thumbs.db
+
+# エディタ固有ファイル
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

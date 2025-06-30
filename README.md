@@ -4,7 +4,7 @@
 
 ## 概要
 
-`unipkg`は、異なるパッケージマネージャーのパッケージ操作（一覧表示、情報取得、削除、アップデート）を統一されたインターフェースで実行できるツールです。macOSやUnix系システムで利用可能な主要なパッケージマネージャーに対応しています。
+`unipkg`は、異なるパッケージマネージャーのパッケージ操作（一覧表示、情報取得、削除、アップデート）を統一されたインターフェースで実行できるツールです。macOSやUnix系システムで利用可能な**19種類**のパッケージマネージャーに対応し、**バージョン情報表示機能**も含む包括的なパッケージ管理ツールです。
 
 
 ## 注意 Claude Codeのみで開発する実験の成果物です
@@ -25,6 +25,7 @@
 - unipkgのコメント形式 /* */ はbashで使用できない形式です # に修正してください
 - 一覧表示の時にバージョン番号も表示したい
 - npmでanthropic-ai/claude-code@1.0.35とバージョン表示されているのは、パッケージ名 anthropic-ai/claude-code, バージョン 1.0.35 が正しいです
+- システムパッケージマネージャーや、バージョン管理マネージャについても、バージョン表示の対応を進めてください
 
 
 ## 対応パッケージマネージャー
@@ -174,6 +175,8 @@ brew         git                            2.50.0
 npm          @anthropic-ai/claude-code      1.0.35
 pip3         requests                       2.31.0
 gem          bundler                        2.4.10
+nvm          Node.js                        18.17.0
+rbenv        Ruby                           3.0.0
 ```
 
 ### カウントモード
@@ -202,11 +205,13 @@ gem        48
 ### バージョン情報付きJSON形式
 ```json
 {
-  "timestamp": "2025-06-30T17:46:02+09:00",
+  "timestamp": "2025-06-30T21:59:31+09:00",
   "packages": [
     {"manager": "brew", "package": "bat", "version": "0.25.0_1"},
     {"manager": "npm", "package": "@anthropic-ai/claude-code", "version": "1.0.35"},
-    {"manager": "pip3", "package": "requests", "version": "2.31.0"}
+    {"manager": "pip3", "package": "requests", "version": "2.31.0"},
+    {"manager": "gem", "package": "bundler", "version": "1.17.2"},
+    {"manager": "nvm", "package": "Node.js", "version": "18.17.0"}
   ]
 }
 ```
@@ -225,6 +230,9 @@ Manager,Package,Version
 brew,bat,0.25.0_1
 npm,@anthropic-ai/claude-code,1.0.35
 pip3,requests,2.31.0
+gem,bundler,1.17.2
+nvm,Node.js,18.17.0
+rbenv,Ruby,3.0.0
 ```
 
 ### パッケージ情報表示
