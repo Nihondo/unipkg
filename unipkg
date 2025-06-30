@@ -284,11 +284,12 @@ get_npm_packages() {
             echo "$packages" | while read -r line; do
                 if [[ -n "$line" ]]; then
                     if [[ "$WITH_VERSION" == "true" ]]; then
-                        # パッケージ名@バージョン形式を分離
+                        # パッケージ名@バージョン形式を分離（スコープ付きパッケージ対応）
                         if [[ "$line" == *"@"* ]]; then
-                            local package=$(echo "$line" | cut -d'@' -f1)
-                            local version=$(echo "$line" | cut -d'@' -f2-)
-                            echo "npm,$package,${version:-N/A}"
+                            # 最後の@以降がバージョン
+                            local package=$(echo "$line" | sed 's/@[^@]*$//')
+                            local version=$(echo "$line" | sed 's/.*@//')
+                            echo "npm,$package,$version"
                         else
                             echo "npm,$line,N/A"
                         fi
