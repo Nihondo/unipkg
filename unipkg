@@ -29,6 +29,7 @@ show_help() {
     -o, --output FILE   結果をファイルに出力
     -c, --count         パッケージ数のみを表示
     -v, --with-version  バージョン情報も表示
+    -nv, --new-version  現在のバージョンと最新バージョンを表示
     -i, --info PACKAGE  指定したパッケージの詳細情報を表示
     -d, --delete PACKAGE     指定したパッケージを削除
     -u, --update [PACKAGE]  全パッケージまたは指定パッケージをアップデート
@@ -84,6 +85,7 @@ OUTPUT_FORMAT="table"
 OUTPUT_FILE=""
 COUNT_ONLY=false
 WITH_VERSION=false
+NEW_VERSION=false
 INFO_MODE=false
 DELETE_MODE=false
 UPDATE_MODE=false
@@ -116,6 +118,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -v|--with-version)
+            WITH_VERSION=true
+            shift
+            ;;
+        -nv|--new-version)
+            NEW_VERSION=true
             WITH_VERSION=true
             shift
             ;;
@@ -213,6 +220,82 @@ print_success() {
     echo -e "${GREEN}成功:${NC} $1" >&2
 }
 
+# 最新バージョン取得関数
+get_latest_version_brew() {
+    local package="$1"
+    brew info "$package" 2>/dev/null | grep "==> $package:" | head -1 | sed 's/.*stable \([^ ]*\).*/\1/'
+}
+
+# brew用の更新情報を一括取得（高速化）
+get_brew_outdated_info() {
+    if check_command brew; then
+        # 更新可能なパッケージの詳細情報を一括取得
+        # フォーマット: package (current) < latest
+        brew outdated --verbose 2>/dev/null | while read -r line; do
+            local package=$(echo "$line" | cut -d' ' -f1)
+            local current=$(echo "$line" | sed 's/.*(\([^)]*\)).*/\1/')
+            local latest=$(echo "$line" | sed 's/.* < //')
+            echo "$package,$current,$latest"
+        done
+    fi
+}
+
+get_latest_version_npm() {
+    local package="$1"
+    npm view "$package" version 2>/dev/null
+}
+
+get_latest_version_pip3() {
+    local package="$1"
+    pip3 show "$package" 2>/dev/null | grep Version | cut -d' ' -f2
+}
+
+get_latest_version_gem() {
+    local package="$1"
+    gem list "$package" --remote --exact 2>/dev/null | grep -E "^$package \(" | sed 's/.*(\([^)]*\)).*/\1/' | cut -d',' -f1
+}
+
+get_latest_version_cargo() {
+    local package="$1"
+    cargo search "$package" --limit 1 2>/dev/null | grep "^$package " | awk '{print $3}' | tr -d '"'
+}
+
+# dnf用の更新情報を一括取得（高速化）
+get_dnf_updates_info() {
+    if check_command dnf; then
+        # 更新可能なパッケージの詳細情報を一括取得
+        dnf list updates 2>/dev/null | grep -E "^[a-zA-Z]" | grep -v "Last metadata\|Available Upgrades" | while read -r line; do
+            local package=$(echo "$line" | awk '{print $1}' | cut -d'.' -f1)
+            local version_full=$(echo "$line" | awk '{print $2}')
+            # バージョン形式の処理: 1:7.1.1.47-1.el9.remi -> 7.1.1.47-1.el9.remi（エポック値のみ除去）
+            local latest_version
+            if [[ "$version_full" == *":"* ]]; then
+                latest_version=$(echo "$version_full" | cut -d':' -f2)
+            else
+                latest_version="$version_full"
+            fi
+            echo "$package,$latest_version"
+        done
+    fi
+}
+
+# バージョン比較関数（セマンティックバージョニング対応）
+compare_versions() {
+    local current="$1"
+    local latest="$2"
+    
+    if [[ "$current" == "$latest" ]]; then
+        return 0  # 同じバージョン
+    fi
+    
+    # 簡単なバージョン比較（セマンティックバージョニング）
+    if [[ $(printf '%s\n' "$current" "$latest" | sort -V | head -1) == "$current" ]]; then
+        return 1  # 現在のバージョンが古い
+    else
+        return 2  # 現在のバージョンが新しい
+    fi
+}
+
 # Homebrewパッケージ一覧取得
 # `brew list --formula`を使用してインストール済みパッケージを取得
 # カウントモードではパッケージ数のみを返す
@@ -232,19 +315,44 @@ get_brew_packages() {
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "brew,$count"
         else
-            # CSV形式で出力
-            echo "$packages" | while read -r line; do
-                if [[ -n "$line" ]]; then
-                    if [[ "$WITH_VERSION" == "true" ]]; then
+            if [[ "$NEW_VERSION" == "true" ]]; then
+                # 更新情報を一括取得して高速化
+                local outdated_info=$(get_brew_outdated_info)
+                
+                # CSV形式で出力
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
+                        # パッケージ名とバージョンを分離
+                        local package=$(echo "$line" | awk '{print $1}')
+                        local version=$(echo "$line" | awk '{print $2}')
+                        
+                        # 更新情報から最新バージョンを検索
+                        local latest_version=$(echo "$outdated_info" | grep "^$package," | cut -d',' -f3)
+                        if [[ -z "$latest_version" ]]; then
+                            # 更新がない場合は現在のバージョンが最新
+                            latest_version="$version"
+                        fi
+                        
+                        echo "brew,$package,${version:-N/A},${latest_version:-N/A}"
+                    fi
+                done
+            elif [[ "$WITH_VERSION" == "true" ]]; then
+                # CSV形式で出力
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
                         # パッケージ名とバージョンを分離
                         local package=$(echo "$line" | awk '{print $1}')
                         local version=$(echo "$line" | awk '{print $2}')
                         echo "brew,$package,${version:-N/A}"
-                    else
+                    fi
+                done
+            else
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
                         echo "brew,$line"
                     fi
-                fi
-            done
+                done
+            fi
         fi
     else
         print_warning "Homebrewが見つかりません"
@@ -289,9 +397,21 @@ get_npm_packages() {
                             # 最後の@以降がバージョン
                             local package=$(echo "$line" | sed 's/@[^@]*$//')
                             local version=$(echo "$line" | sed 's/.*@//')
-                            echo "npm,$package,$version"
+                            
+                            if [[ "$NEW_VERSION" == "true" ]]; then
+                                # 最新バージョンを取得
+                                local latest_version=$(get_latest_version_npm "$package")
+                                echo "npm,$package,$version,${latest_version:-N/A}"
+                            else
+                                echo "npm,$package,$version"
+                            fi
                         else
-                            echo "npm,$line,N/A"
+                            if [[ "$NEW_VERSION" == "true" ]]; then
+                                local latest_version=$(get_latest_version_npm "$line")
+                                echo "npm,$line,N/A,${latest_version:-N/A}"
+                            else
+                                echo "npm,$line,N/A"
+                            fi
                         fi
                     else
                         echo "npm,$line"
@@ -585,18 +705,56 @@ get_dnf_packages() {
         if [[ "$COUNT_ONLY" == "true" ]]; then
             echo "dnf,$count"
         else
-            echo "$packages" | while read -r line; do
-                if [[ -n "$line" ]]; then
-                    if [[ "$WITH_VERSION" == "true" ]]; then
+            if [[ "$NEW_VERSION" == "true" ]]; then
+                # 更新情報を一括取得して高速化
+                local updates_info=$(get_dnf_updates_info)
+                
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
                         # package.arch version repo 形式を分離
                         local package=$(echo "$line" | awk '{print $1}' | sed 's/\.[^.]*$//')
-                        local version=$(echo "$line" | awk '{print $2}')
+                        local version_full=$(echo "$line" | awk '{print $2}')
+                        # バージョン形式の処理: 1:7.1.1.47-1.el9.remi -> 7.1.1.47-1.el9.remi（エポック値のみ除去）
+                        local current_version
+                        if [[ "$version_full" == *":"* ]]; then
+                            current_version=$(echo "$version_full" | cut -d':' -f2)
+                        else
+                            current_version="$version_full"
+                        fi
+                        
+                        # 更新情報から最新バージョンを検索
+                        local latest_version=$(echo "$updates_info" | grep "^$package," | cut -d',' -f2)
+                        if [[ -z "$latest_version" ]]; then
+                            # 更新がない場合は現在のバージョンが最新
+                            latest_version="$current_version"
+                        fi
+                        
+                        echo "dnf,$package,$current_version,$latest_version"
+                    fi
+                done
+            elif [[ "$WITH_VERSION" == "true" ]]; then
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
+                        # package.arch version repo 形式を分離
+                        local package=$(echo "$line" | awk '{print $1}' | sed 's/\.[^.]*$//')
+                        local version_full=$(echo "$line" | awk '{print $2}')
+                        # バージョン形式の処理: 1:7.1.1.47-1.el9.remi -> 7.1.1.47-1.el9.remi（エポック値のみ除去）
+                        local version
+                        if [[ "$version_full" == *":"* ]]; then
+                            version=$(echo "$version_full" | cut -d':' -f2)
+                        else
+                            version="$version_full"
+                        fi
                         echo "dnf,$package,$version"
-                    else
+                    fi
+                done
+            else
+                echo "$packages" | while read -r line; do
+                    if [[ -n "$line" ]]; then
                         echo "dnf,$line"
                     fi
-                fi
-            done
+                done
+            fi
         fi
     else
         print_warning "dnfが見つかりません"
@@ -1909,7 +2067,24 @@ output_json() {
     echo "  \"packages\": ["
     
     local first=true
-    if [[ "$WITH_VERSION" == "true" ]]; then
+    if [[ "$NEW_VERSION" == "true" ]]; then
+        while IFS=',' read -r manager package current latest; do
+            if [[ "$first" == "true" ]]; then
+                first=false
+            else
+                echo ","
+            fi
+            local status="OK"
+            if [[ "$current" != "$latest" && "$latest" != "N/A" && "$current" != "N/A" ]]; then
+                compare_versions "$current" "$latest"
+                case $? in
+                    1) status="UPDATE" ;;
+                    2) status="NEWER" ;;
+                esac
+            fi
+            echo -n "    {\"manager\": \"$manager\", \"package\": \"$package\", \"current\": \"$current\", \"latest\": \"$latest\", \"status\": \"$status\"}"
+        done <<< "$data"
+    elif [[ "$WITH_VERSION" == "true" ]]; then
         while IFS=',' read -r manager package version; do
             if [[ "$first" == "true" ]]; then
                 first=false
@@ -1940,12 +2115,26 @@ output_json() {
 #   $1 - CSV形式のパッケージデータ
 output_csv() {
     local data="$1"
-    if [[ "$WITH_VERSION" == "true" ]]; then
+    if [[ "$NEW_VERSION" == "true" ]]; then
+        echo "Manager,Package,Current,Latest,Status"
+        while IFS=',' read -r manager package current latest; do
+            local status="OK"
+            if [[ "$current" != "$latest" && "$latest" != "N/A" && "$current" != "N/A" ]]; then
+                compare_versions "$current" "$latest"
+                case $? in
+                    1) status="UPDATE" ;;
+                    2) status="NEWER" ;;
+                esac
+            fi
+            echo "$manager,$package,$current,$latest,$status"
+        done <<< "$data"
+    elif [[ "$WITH_VERSION" == "true" ]]; then
         echo "Manager,Package,Version"
+        echo "$data"
     else
         echo "Manager,Package"
+        echo "$data"
     fi
-    echo "$data"
 }
 
 # 結果をテーブル形式で出力
@@ -1963,7 +2152,22 @@ output_table() {
             printf "%-10s %s\n" "$manager" "$count"
         done <<< "$data"
     else
-        if [[ "$WITH_VERSION" == "true" ]]; then
+        if [[ "$NEW_VERSION" == "true" ]]; then
+            printf "${BLUE}%-12s${NC} ${GREEN}%-30s${NC} ${YELLOW}%-15s${NC} ${YELLOW}%-15s${NC} ${RED}%s${NC}\n" "Manager" "Package" "Current" "Latest" "Status"
+            printf "%-12s %-30s %-15s %-15s %s\n" "------------" "------------------------------" "---------------" "---------------" "------"
+            while IFS=',' read -r manager package current latest; do
+                local status="OK"
+                local color="${GREEN}"
+                if [[ "$current" != "$latest" && "$latest" != "N/A" && "$current" != "N/A" ]]; then
+                    compare_versions "$current" "$latest"
+                    case $? in
+                        1) status="UPDATE"; color="${RED}" ;;
+                        2) status="NEWER"; color="${YELLOW}" ;;
+                    esac
+                fi
+                printf "%-12s %-30s %-15s %-15s ${color}%s${NC}\n" "$manager" "$package" "$current" "$latest" "$status"
+            done <<< "$data"
+        elif [[ "$WITH_VERSION" == "true" ]]; then
             printf "${BLUE}%-12s${NC} ${GREEN}%-30s${NC} ${YELLOW}%s${NC}\n" "Manager" "Package" "Version"
             printf "%-12s %-30s %s\n" "------------" "------------------------------" "-------"
             while IFS=',' read -r manager package version; do

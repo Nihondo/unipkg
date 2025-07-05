@@ -26,6 +26,11 @@
 - 一覧表示の時にバージョン番号も表示したい
 - npmでanthropic-ai/claude-code@1.0.35とバージョン表示されているのは、パッケージ名 anthropic-ai/claude-code, バージョン 1.0.35 が正しいです
 - システムパッケージマネージャーや、バージョン管理マネージャについても、バージョン表示の対応を進めてください
+- -nv を指定した場合に、インストールされているバージョン番号の表示に加えて、そのパッケージの最新バージョンを表示。かつ更新バージョンがある場合はカラーリングで示してください
+- brewについては、更新があるバージョンの取得コマンド brew outdated が別に用意されているので、こちらを使って高速化してください
+- dnfについて実装しましょう dnf list updatesで更新のあるパッケージが取得できます
+- dnfパッケージのバージョン形式の取得で、ハイフンより後の情報をカットしないでください
+- nvオプションの追加をメモリに記憶し、READMEも更新してください
 
 
 ## 対応パッケージマネージャー
@@ -90,11 +95,20 @@ chmod +x unipkg
 # 特定のパッケージマネージャーでバージョン情報を表示
 ./unipkg brew -v
 
+# 現在のバージョンと最新バージョンを比較表示（更新必要なパッケージは赤色表示）
+./unipkg -nv
+
+# 特定のパッケージマネージャーで最新バージョンと比較
+./unipkg brew -nv
+
 # JSON形式で出力
 ./unipkg -f json
 
 # バージョン情報付きでJSON形式で出力
 ./unipkg -v -f json
+
+# 最新バージョン比較をJSON形式で出力
+./unipkg -nv -f json
 
 # パッケージの詳細情報を表示
 ./unipkg -i git
@@ -135,6 +149,9 @@ chmod +x unipkg
 # バージョン情報付きでCSV形式で出力
 ./unipkg -v -f csv -o packages_with_versions.csv
 
+# 最新バージョン比較をCSV形式で出力
+./unipkg -nv -f csv -o packages_with_latest.csv
+
 # 色の出力を無効にする
 ./unipkg --no-color
 ```
@@ -146,6 +163,7 @@ chmod +x unipkg
 - `-o, --output FILE`: 結果をファイルに出力
 - `-c, --count`: パッケージ数のみを表示
 - `-v, --with-version`: バージョン情報も表示
+- `-nv, --new-version`: 現在のバージョンと最新バージョンを比較表示
 - `-i, --info PACKAGE`: 指定したパッケージの詳細情報を表示
 - `-d, --delete PACKAGE`: 指定したパッケージを削除
 - `-u, --update [PACKAGE]`: 全パッケージまたは指定パッケージをアップデート
@@ -178,6 +196,22 @@ gem          bundler                        2.4.10
 nvm          Node.js                        18.17.0
 rbenv        Ruby                           3.0.0
 ```
+
+### 最新バージョン比較表示（-nvオプション）
+```
+Manager      Package                        Current         Latest          Status
+------------ ------------------------------ --------------- --------------- ------
+brew         bat                            0.25.0_1        0.25.0_1        OK
+brew         git                            2.50.0          2.51.0          UPDATE
+npm          @anthropic-ai/claude-code      1.0.35          1.0.40          UPDATE
+pip3         requests                       2.31.0          2.31.0          OK
+dnf          vim                            9.0.2120-1.el9  9.0.2153-1.el9  UPDATE
+```
+
+**ステータス表示**:
+- `OK` (緑色): 最新バージョン
+- `UPDATE` (赤色): 更新が必要
+- `NEWER` (黄色): インストール版が新しい
 
 ### カウントモード
 ```
@@ -216,6 +250,19 @@ gem        48
 }
 ```
 
+### 最新バージョン比較JSON形式（-nvオプション）
+```json
+{
+  "timestamp": "2025-07-05T21:45:12+09:00",
+  "packages": [
+    {"manager": "brew", "package": "bat", "current": "0.25.0_1", "latest": "0.25.0_1", "status": "OK"},
+    {"manager": "brew", "package": "git", "current": "2.50.0", "latest": "2.51.0", "status": "UPDATE"},
+    {"manager": "npm", "package": "@anthropic-ai/claude-code", "current": "1.0.35", "latest": "1.0.40", "status": "UPDATE"},
+    {"manager": "dnf", "package": "vim", "current": "9.0.2120-1.el9", "latest": "9.0.2153-1.el9", "status": "UPDATE"}
+  ]
+}
+```
+
 ### CSV形式
 ```
 Manager,Package
@@ -233,6 +280,15 @@ pip3,requests,2.31.0
 gem,bundler,1.17.2
 nvm,Node.js,18.17.0
 rbenv,Ruby,3.0.0
+```
+
+### 最新バージョン比較CSV形式（-nvオプション）
+```
+Manager,Package,Current,Latest,Status
+brew,bat,0.25.0_1,0.25.0_1,OK
+brew,git,2.50.0,2.51.0,UPDATE
+npm,@anthropic-ai/claude-code,1.0.35,1.0.40,UPDATE
+dnf,vim,9.0.2120-1.el9,9.0.2153-1.el9,UPDATE
 ```
 
 ### パッケージ情報表示
@@ -281,6 +337,16 @@ y
 - システムパッケージ（dnf、yum、apt等）の操作には`sudo`権限が必要です
 - アップデート処理は時間がかかる場合があります
 
+### 最新バージョン比較機能（-nvオプション）について
+- **実装済みパッケージマネージャー**: `brew`（高速化済み）、`npm`、`dnf`
+- **部分実装**: `pip3`, `gem`, `cargo`（最新バージョン取得関数のみ定義済み）
+- **未実装**: その他のパッケージマネージャー
+- **パフォーマンス**: 
+  - `brew`: `brew outdated`で一括取得（高速）
+  - `dnf`: `dnf list updates`で一括取得（高速）
+  - `npm`: 個別パッケージごとに`npm view`で取得（やや時間がかかる）
+
+### その他の注意事項
 - CPANは設定が複雑なため、Perlモジュール一覧として代替実装しています
 - Goモジュールは`$GOPATH/pkg/mod`または`$HOME/go/pkg/mod`から検索します
 - 一部のパッケージマネージャーが利用できない場合は警告メッセージが表示されます
