@@ -4,7 +4,10 @@
 
 ## 概要
 
-`unipkg`は、異なるパッケージマネージャーのパッケージ操作（一覧表示、情報取得、削除、アップデート）を統一されたインターフェースで実行できるツールです。macOSやUnix系システムで利用可能な**19種類**のパッケージマネージャーに対応し、**バージョン情報表示機能**も含む包括的なパッケージ管理ツールです。
+`unipkg`は、異なるパッケージマネージャーのパッケージ操作（一覧表示、情報取得、削除、アップデート）を統一されたインターフェースで実行できるツールです。macOSやUnix系システムで利用可能な**19種類**のパッケージマネージャーに対応し、**バージョン情報表示機能**と**最新バージョン比較・ステータス表示機能**を含む包括的なパッケージ管理ツールです。
+
+### 新機能: モジュラーアーキテクチャ
+v2.0では完全なモジュラーアーキテクチャを採用し、各パッケージマネージャーの機能が独立したモジュールに分離されています。これにより保守性と拡張性が大幅に向上しました。
 
 
 ## 注意 Claude Codeのみで開発する実験の成果物です
@@ -31,27 +34,34 @@
 - dnfについて実装しましょう dnf list updatesで更新のあるパッケージが取得できます
 - dnfパッケージのバージョン形式の取得で、ハイフンより後の情報をカットしないでください
 - nvオプションの追加をメモリに記憶し、READMEも更新してください
+- パッケージマネージャごとにシェルを分割して、managerディレクトリ配下のサブモジュールとして管理するように変更します
+- brew.sh 29行目、32行目の brew コマンドが、パスが通ってないのではないでしょうか
+- get_brew_outdated_info関数は正しく、カラムを取得できていないです。brew outdated --formula は "cloudflared (2025.6.1) < 2025.7.0" の形式での出力です
+- オリジナルにあった、現バージョンと最新バージョンが異なる場合の Status 表記がなくなりました。format_table 関数の場合だけ、表示をリッチにするのと合わせて Latest, Outdated のステータス列を追加します
+- brew以外のマネージャーでも最新バージョンを返すものにはstatusを追加してください
+- gemの最新バージョン取得が、「"gem" "psych" "3.1.0" "5.2.6 ruby java" "Outdated"」のように不要な文字列が残っています
 
 
 ## 対応パッケージマネージャー
 
-### アプリケーションパッケージマネージャー
-- **brew**: Homebrew (macOS)
-- **npm**: Node Package Manager
+### アプリケーションパッケージマネージャー（8個）
+- **brew**: Homebrew (macOS) - 最新バージョン比較対応
+- **npm**: Node Package Manager - 最新バージョン比較対応
 - **perl**: Perl modules (ExtUtils::Installed使用)
-- **pip3**: Python Package Index
-- **gem**: Ruby Gems
+- **cpan**: CPAN (Perl)
+- **pip3**: Python Package Index - 最新バージョン比較対応
+- **gem**: Ruby Gems - 最新バージョン比較対応
 - **cargo**: Rust Cargo packages
 - **go**: Go modules
 
-### システムパッケージマネージャー
-- **dnf**: DNF Package Manager (Fedora/RHEL 8+)
+### システムパッケージマネージャー（5個）
+- **dnf**: DNF Package Manager (Fedora/RHEL 8+) - 最新バージョン比較対応
 - **yum**: YUM Package Manager (RHEL/CentOS)
 - **apt**: APT Package Manager (Debian/Ubuntu)
 - **dpkg**: DPKG Package Manager (Debian/Ubuntu)
 - **rpm**: RPM Package Manager (Red Hat系)
 
-### バージョン管理マネージャー
+### バージョン管理マネージャー（9個）
 - **nvm**: Node Version Manager
 - **rbenv**: Ruby Version Manager
 - **pyenv**: Python Version Manager
@@ -201,17 +211,16 @@ rbenv        Ruby                           3.0.0
 ```
 Manager      Package                        Current         Latest          Status
 ------------ ------------------------------ --------------- --------------- ------
-brew         bat                            0.25.0_1        0.25.0_1        OK
-brew         git                            2.50.0          2.51.0          UPDATE
-npm          @anthropic-ai/claude-code      1.0.35          1.0.40          UPDATE
-pip3         requests                       2.31.0          2.31.0          OK
-dnf          vim                            9.0.2120-1.el9  9.0.2153-1.el9  UPDATE
+brew         bat                            0.25.0_1        0.25.0_1        Latest
+brew         git                            2.50.0          2.51.0          Outdated
+npm          @anthropic-ai/claude-code      1.0.35          1.0.40          Outdated
+pip3         requests                       2.31.0          2.31.0          Latest
+dnf          vim                            9.0.2120-1.el9  9.0.2153-1.el9  Outdated
 ```
 
 **ステータス表示**:
-- `OK` (緑色): 最新バージョン
-- `UPDATE` (赤色): 更新が必要
-- `NEWER` (黄色): インストール版が新しい
+- `Latest` (緑色): 最新バージョン
+- `Outdated` (赤色): 更新が必要
 
 ### カウントモード
 ```
@@ -252,15 +261,12 @@ gem        48
 
 ### 最新バージョン比較JSON形式（-nvオプション）
 ```json
-{
-  "timestamp": "2025-07-05T21:45:12+09:00",
-  "packages": [
-    {"manager": "brew", "package": "bat", "current": "0.25.0_1", "latest": "0.25.0_1", "status": "OK"},
-    {"manager": "brew", "package": "git", "current": "2.50.0", "latest": "2.51.0", "status": "UPDATE"},
-    {"manager": "npm", "package": "@anthropic-ai/claude-code", "current": "1.0.35", "latest": "1.0.40", "status": "UPDATE"},
-    {"manager": "dnf", "package": "vim", "current": "9.0.2120-1.el9", "latest": "9.0.2153-1.el9", "status": "UPDATE"}
-  ]
-}
+[
+  {"Manager": "brew", "Package": "bat", "Current Version": "0.25.0_1", "Latest Version": "0.25.0_1", "Status": "Latest"},
+  {"Manager": "brew", "Package": "git", "Current Version": "2.50.0", "Latest Version": "2.51.0", "Status": "Outdated"},
+  {"Manager": "npm", "Package": "@anthropic-ai/claude-code", "Current Version": "1.0.35", "Latest Version": "1.0.40", "Status": "Outdated"},
+  {"Manager": "dnf", "Package": "vim", "Current Version": "9.0.2120-1.el9", "Latest Version": "9.0.2153-1.el9", "Status": "Outdated"}
+]
 ```
 
 ### CSV形式
@@ -284,11 +290,11 @@ rbenv,Ruby,3.0.0
 
 ### 最新バージョン比較CSV形式（-nvオプション）
 ```
-Manager,Package,Current,Latest,Status
-brew,bat,0.25.0_1,0.25.0_1,OK
-brew,git,2.50.0,2.51.0,UPDATE
-npm,@anthropic-ai/claude-code,1.0.35,1.0.40,UPDATE
-dnf,vim,9.0.2120-1.el9,9.0.2153-1.el9,UPDATE
+Manager,Package,Current Version,Latest Version,Status
+brew,bat,0.25.0_1,0.25.0_1,Latest
+brew,git,2.50.0,2.51.0,Outdated
+npm,@anthropic-ai/claude-code,1.0.35,1.0.40,Outdated
+dnf,vim,9.0.2120-1.el9,9.0.2153-1.el9,Outdated
 ```
 
 ### パッケージ情報表示
@@ -338,13 +344,15 @@ y
 - アップデート処理は時間がかかる場合があります
 
 ### 最新バージョン比較機能（-nvオプション）について
-- **実装済みパッケージマネージャー**: `brew`（高速化済み）、`npm`、`dnf`
-- **部分実装**: `pip3`, `gem`, `cargo`（最新バージョン取得関数のみ定義済み）
-- **未実装**: その他のパッケージマネージャー
+- **完全実装**: `brew`、`npm`、`gem`、`pip3`、`dnf`
+- **ステータス表示**: `Latest`（最新）と`Outdated`（更新必要）をカラー表示
+- **未実装**: その他のパッケージマネージャー（将来追加予定）
 - **パフォーマンス**: 
-  - `brew`: `brew outdated`で一括取得（高速）
+  - `brew`: `brew outdated --verbose`で一括取得（高速）
   - `dnf`: `dnf list updates`で一括取得（高速）
   - `npm`: 個別パッケージごとに`npm view`で取得（やや時間がかかる）
+  - `gem`: 個別パッケージごとに`gem list --remote`で取得（やや時間がかかる）
+  - `pip3`: ローカル情報のみ（限定的機能）
 
 ### その他の注意事項
 - CPANは設定が複雑なため、Perlモジュール一覧として代替実装しています
@@ -356,5 +364,18 @@ y
 
 - **言語**: Bash
 - **動作環境**: macOS、Linux、その他Unix系システム
+- **アーキテクチャ**: モジュラー設計（22個の独立モジュール）
+- **互換性**: bash 3.2.57以上（macOSのデフォルトbashに対応）
 - **依存関係**: 各パッケージマネージャーが個別にインストールされている必要があります
 - **エラーハンドリング**: `set -euo pipefail`による厳密なエラー処理
+
+### ファイル構成
+```
+unipkg/
+├── unipkg                    # メインスクリプト
+└── manager/
+    ├── common.sh            # 共通ユーティリティ関数
+    ├── application/         # アプリケーションパッケージマネージャー（8個）
+    ├── system/             # システムパッケージマネージャー（5個）
+    └── version/            # バージョン管理マネージャー（9個）
+```
